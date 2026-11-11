@@ -1,0 +1,6 @@
+# /etc/caddy/Caddyfile — Caddy saca y renueva el certificado HTTPS solo (Meta exige HTTPS).
+# Cambia el dominio por el tuyo (sirve uno gratuito de duckdns.org).
+citas.ejemplo.duckdns.org {
+	encode gzip
+	reverse_proxy 127.0.0.1:8000
+}

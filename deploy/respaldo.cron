@@ -1,0 +1,2 @@
+# Respaldo diario de la base a las 3:15 (conserva 14 copias). Instalar con: sudo crontab -u citas deploy/respaldo.cron
+15 3 * * * cd /opt/citas && .venv/bin/python -m app.cli respaldo --carpeta /opt/citas/backups >> /opt/citas/backups/respaldo.log 2>&1

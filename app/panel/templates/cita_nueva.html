@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Nueva cita{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Nueva cita</h1>
+  <p class="muted small">Para clientes que llegan sin cita o que llaman por teléfono. Desde aquí se puede agendar fuera del horario normal, pero nunca encima de otra cita o de un bloqueo.</p>
+  <form method="post" action="/citas/nueva" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Servicio
+      <select name="service_id" required>
+        <option value="">Elige…</option>
+        {% for s in services %}<option value="{{ s.id }}" {% if v.service_id|string == s.id|string %}selected{% endif %}>{{ s.name }} ({{ s.duration_min }} min)</option>{% endfor %}
+      </select>
+    </label>
+    <label>{{ business.staff_label|capitalize }}
+      <select name="staff_id" required>
+        {% if staff|length > 1 %}<option value="">Elige…</option>{% endif %}
+        {% for m in staff %}<option value="{{ m.id }}" {% if v.staff_id|string == m.id|string %}selected{% endif %}>{{ m.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <div class="row">
+      <label>Fecha <input type="date" name="fecha" value="{{ v.fecha }}" required></label>
+      <label>Hora <input type="time" name="hora" value="{{ v.hora }}" step="300" required></label>
+    </div>
+    <label>Teléfono (WhatsApp) <input name="telefono" inputmode="tel" value="{{ v.telefono }}" placeholder="55 1234 5678" required></label>
+    <label>Nombre <input name="nombre" value="{{ v.nombre }}" autocomplete="off"></label>
+    <label>Notas <textarea name="notas" rows="2">{{ v.notas }}</textarea></label>
+    <button class="primary">Agendar</button>
+  </form>
+</section>
+{% endblock %}

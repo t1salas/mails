@@ -1,0 +1,61 @@
+# Configuración de un negocio. Cópialo (p. ej. config/negocio.toml), ajústalo y cárgalo con:
+#   python -m app.cli cargar-config config/negocio.toml
+# Se puede volver a cargar cuando cambie algo: actualiza sin borrar citas.
+
+[business]
+slug = "barberia-piloto"                 # identificador interno, sin espacios
+name = "Barbería El Piloto"
+timezone = "America/Mexico_City"         # zona horaria IANA del negocio
+currency_symbol = "$"
+default_country_code = "52"              # lada de país para teléfonos capturados en el panel
+address = "Av. Siempre Viva 742, Centro"
+phone = "55 1234 5678"                   # teléfono para dudas que el bot no resuelve
+info_text = """
+🕐 Lun a vie 10:00–20:00 · Sáb 9:00–15:00
+💳 Efectivo y tarjeta"""
+staff_label = "barbero"                  # "estilista", "manicurista", "terapeuta"...
+
+# phone_number_id del número de WhatsApp (Meta > WhatsApp > Configuración de la API)
+wa_phone_number_id = ""
+
+# Reglas de agenda
+slot_interval_min = 15                   # cada cuánto se ofrecen horarios
+min_notice_min = 60                      # anticipación mínima para reservar por WhatsApp
+max_days_ahead = 14                      # hasta cuántos días adelante se puede reservar
+change_limit_min = 120                   # el cliente puede cancelar/reprogramar hasta 2 h antes
+
+# Recordatorios
+reminder_hours = 24                      # 0 = sin recordatorios
+reminder_template = "recordatorio_cita"  # nombre de la plantilla aprobada en Meta ("" = sin plantilla)
+template_lang = "es_MX"
+
+[[services]]
+name = "Corte clásico"
+duration_min = 30
+price = 150
+
+[[services]]
+name = "Corte + barba"
+duration_min = 50
+price = 230
+
+[[services]]
+name = "Barba"
+duration_min = 25
+price = 120
+
+[[services]]
+name = "Corte niño"
+duration_min = 25
+price = 120
+
+# Días: lun, mar, mie, jue, vie, sab, dom. Varios tramos por día para la comida.
+[[staff]]
+name = "Juan"
+services = "*"                           # "*" = todos los servicios
+hours = { lun = ["10:00-14:00", "15:00-20:00"], mar = ["10:00-14:00", "15:00-20:00"], mie = ["10:00-14:00", "15:00-20:00"], jue = ["10:00-14:00", "15:00-20:00"], vie = ["10:00-14:00", "15:00-20:00"], sab = ["09:00-15:00"] }
+
+[[staff]]
+name = "Pedro"
+services = ["Corte clásico", "Corte niño", "Barba"]
+hours = { mar = ["11:00-20:00"], mie = ["11:00-20:00"], jue = ["11:00-20:00"], vie = ["11:00-20:00"], sab = ["09:00-15:00"], dom = ["10:00-14:00"] }

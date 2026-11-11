@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}{{ day_label }}{% endblock %}
+{% block content %}
+<div class="daynav">
+  <a class="btn" href="/agenda?d={{ prev }}" aria-label="Día anterior">‹</a>
+  <form method="get" action="/agenda" class="inline">
+    <input type="date" name="d" value="{{ day.isoformat() }}" onchange="this.form.submit()">
+  </form>
+  <a class="btn" href="/agenda?d={{ next }}" aria-label="Día siguiente">›</a>
+  {% if not is_today %}<a class="btn" href="/agenda?d={{ today }}">Hoy</a>{% endif %}
+</div>
+<h1>{{ day_label }}{% if is_today %} <span class="muted">(hoy)</span>{% endif %}</h1>
+<div class="columns">
+  {% for col in columns %}
+  <section class="column">
+    <header>
+      <h2>{{ col.staff.name }}</h2>
+      <div class="muted small">{{ col.hours }} · {{ col.active_count }} cita{{ '' if col.active_count == 1 else 's' }}</div>
+      <a class="small" href="/citas/nueva?d={{ day.isoformat() }}&staff_id={{ col.staff.id }}">+ agregar</a>
+    </header>
+    {% for i in col['items'] %}
+      {% if i.kind == 'block' %}
+      <article class="block"><span class="time">{{ i.start }}–{{ i.end }}</span> {{ i.reason }}</article>
+      {% else %}
+      {% with actions=True, show_staff=False %}{% include "_appt.html" %}{% endwith %}
+      {% endif %}
+    {% else %}
+      <p class="empty">Sin citas.</p>
+    {% endfor %}
+  </section>
+  {% endfor %}
+</div>
+{% endblock %}

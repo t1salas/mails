@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#1f2937">
+  <title>{% block title %}Agenda{% endblock %}{% if business %} · {{ business.name }}{% endif %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  {% if user %}
+  <header class="topbar">
+    <div class="brand">{{ business.name }}</div>
+    <nav>
+      <a href="/agenda" class="{% if request.url.path == '/agenda' %}on{% endif %}">Día</a>
+      <a href="/semana" class="{% if request.url.path == '/semana' %}on{% endif %}">Semana</a>
+      <a href="/citas/nueva" class="{% if request.url.path == '/citas/nueva' %}on{% endif %}">+ Cita</a>
+      <a href="/bloqueos" class="{% if request.url.path == '/bloqueos' %}on{% endif %}">Bloqueos</a>
+      <form method="post" action="/logout" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="link">Salir</button>
+      </form>
+    </nav>
+  </header>
+  {% endif %}
+  <main>
+    {% for f in flashes %}
+    <div class="flash {{ f.kind }}">
+      {{ f.msg }}
+      {% if f.link %}<a href="{{ f.link }}" target="_blank" rel="noopener">{{ f.link_text or 'Abrir' }}</a>{% endif %}
+    </div>
+    {% endfor %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

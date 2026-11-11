@@ -1,0 +1,31 @@
+<article class="appt status-{{ i.status }}">
+  <div class="appt-head">
+    <span class="time">{{ i.start }}–{{ i.end }}</span>
+    <span class="badge">{{ i.status_label }}{% if i.confirmed_by_customer and i.status == 'confirmed' %} ✓ cliente{% endif %}</span>
+  </div>
+  <div class="who">{{ i.customer }}</div>
+  <div class="what">{{ i.service }}{% if show_staff %} · {{ i.staff }}{% endif %}{% if i.source == 'panel' %} · <span class="muted">manual</span>{% endif %}</div>
+  {% if i.notes %}<div class="notes">{{ i.notes }}</div>{% endif %}
+  <div class="actions">
+    <a href="{{ i.wa_link }}" target="_blank" rel="noopener">WhatsApp</a>
+    {% if actions and i.status == 'confirmed' %}
+      <form method="post" action="/citas/{{ i.id }}/estado" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="completed">
+        <button>Atendida</button>
+      </form>
+      <form method="post" action="/citas/{{ i.id }}/estado" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="no_show">
+        <button>No vino</button>
+      </form>
+      <form method="post" action="/citas/{{ i.id }}/cancelar" class="inline" onsubmit="return confirm('¿Cancelar esta cita?')">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="danger">Cancelar</button>
+      </form>
+    {% elif actions and i.status in ['completed', 'no_show'] %}
+      <form method="post" action="/citas/{{ i.id }}/estado" class="inline">
+        <input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="status" value="confirmed">
+        <button>Deshacer</button>
+      </form>
+    {% endif %}
+  </div>
+</article>

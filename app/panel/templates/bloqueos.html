@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Bloqueos{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Bloquear horario</h1>
+  <p class="muted small">Vacaciones, día libre, una salida… En ese horario el bot no ofrece citas.</p>
+  <form method="post" action="/bloqueos" class="stack">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>{{ business.staff_label|capitalize }}
+      <select name="staff_id" required>
+        {% for m in staff %}<option value="{{ m.id }}">{{ m.name }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Fecha <input type="date" name="fecha" value="{{ today }}" required></label>
+    <label class="check"><input type="checkbox" name="todo_el_dia" value="1"> Todo el día</label>
+    <div class="row">
+      <label>Desde <input type="time" name="desde" step="300"></label>
+      <label>Hasta <input type="time" name="hasta" step="300"></label>
+    </div>
+    <label>Motivo <input name="motivo" placeholder="Opcional"></label>
+    <button class="primary">Bloquear</button>
+  </form>
+</section>
+<section class="card narrow">
+  <h2>Próximos bloqueos</h2>
+  {% for i in items %}
+  <div class="listrow">
+    <div>
+      <strong>{{ i.staff }}</strong> · {{ i.reason }}<br>
+      <span class="muted small">{{ i.start.strftime('%d/%m %H:%M') }} → {{ i.end.strftime('%d/%m %H:%M') }}</span>
+    </div>
+    <form method="post" action="/bloqueos/{{ i.id }}/borrar" class="inline" onsubmit="return confirm('¿Quitar este bloqueo?')">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="danger">Quitar</button>
+    </form>
+  </div>
+  {% else %}
+  <p class="empty">No hay bloqueos próximos.</p>
+  {% endfor %}
+</section>
+{% endblock %}

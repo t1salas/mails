@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Semana{% endblock %}
+{% block content %}
+<div class="daynav">
+  <a class="btn" href="/semana?d={{ prev }}" aria-label="Semana anterior">‹</a>
+  <strong>{{ range_label }}</strong>
+  <a class="btn" href="/semana?d={{ next }}" aria-label="Semana siguiente">›</a>
+  <a class="btn" href="/semana?d={{ today }}">Hoy</a>
+</div>
+{% for d in days %}
+<section class="weekday{% if d.is_today %} today{% endif %}">
+  <h2><a href="/agenda?d={{ d.date.isoformat() }}">{{ d.label }}</a> <span class="muted small">{{ d['items']|length }} cita{{ '' if d['items']|length == 1 else 's' }}</span></h2>
+  {% for i in d['items'] %}
+    {% with actions=False, show_staff=True %}{% include "_appt.html" %}{% endwith %}
+  {% else %}
+    <p class="empty">Sin citas.</p>
+  {% endfor %}
+</section>
+{% endfor %}
+{% endblock %}

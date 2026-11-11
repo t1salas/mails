@@ -1,0 +1,17 @@
+# /etc/systemd/system/citas.service
+[Unit]
+Description=Bot de citas por WhatsApp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=citas
+WorkingDirectory=/opt/citas
+EnvironmentFile=/opt/citas/.env
+# Un solo worker: la tarea de recordatorios vive dentro del proceso.
+ExecStart=/opt/citas/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --proxy-headers --workers 1
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
