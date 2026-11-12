@@ -162,11 +162,23 @@ python -m bot_trader correr --cada-minutos 30
 - **Una vez al día** (desde `hora_decision_utc`, por defecto 21:00 UTC, después del cierre de Wall Street) **decide**: cierra lo que rompió la tendencia, abre lo que tiene ventaja y manda un resumen.
 - Los stops móviles quedan puestos **en eToro**, que los va moviendo aunque el agente esté apagado.
 
-En un servidor (el mismo de US$5 del bot de citas alcanza), como servicio que se reinicia solo:
+**Qué servidor necesita.** Casi cualquiera: puede ser un VPS que ya tengas con otro proyecto (por ejemplo, el del bot de citas).
+
+- Linux con Python 3.11 o más nuevo (`python3 --version`).
+- Unos 200 MB de memoria libre (`free -m`). Medido: la decisión diaria con 7 activos usa ~55 MB y menos de un segundo de procesador.
+- Solo conexiones de salida. No necesita dominio, puertos abiertos ni HTTPS.
+
+Corre como un servicio aparte, con su propio usuario, y no toca a los otros proyectos del servidor. Si lo compartes, ten en cuenta:
+
+- **Las llaves de eToro quedan guardadas ahí.** Cualquiera con acceso de administrador al servidor puede leerlas, y una falla de seguridad en otro proyecto expuesto a internet es un camino hacia ellas. Por eso el archivo `.env` se deja legible solo para el usuario `trader` (el `chmod 600` de abajo).
+- **Si el servidor se cae, se caen los dos proyectos.** Los stops siguen puestos en eToro.
+
+Como servicio que se reinicia solo:
 
 ```bash
 sudo useradd -r -m -d /opt/trader trader
 sudo cp -r . /opt/trader && sudo chown -R trader: /opt/trader
+sudo chmod 600 /opt/trader/.env                     # las llaves, solo para el usuario trader
 sudo -u trader bash -c 'cd /opt/trader && python3 -m venv .venv && .venv/bin/pip install -e ".[ia]"'
 sudo cp deploy/bot-trader.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now bot-trader
