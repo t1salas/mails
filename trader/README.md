@@ -164,7 +164,7 @@ python -m bot_trader correr --cada-minutos 30
 
 **Qué servidor necesita.** Casi cualquiera: puede ser un VPS que ya tengas con otro proyecto (por ejemplo, el del bot de citas).
 
-- Linux con Python 3.11 o más nuevo (`python3 --version`).
+- Linux con Python 3.10 o más nuevo (`python3 --version`). Probado en 3.10 y 3.13.
 - Unos 200 MB de memoria libre (`free -m`). Medido: la decisión diaria con 7 activos usa ~55 MB y menos de un segundo de procesador.
 - Solo conexiones de salida. No necesita dominio, puertos abiertos ni HTTPS.
 

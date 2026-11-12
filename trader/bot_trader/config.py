@@ -7,9 +7,13 @@ un error de dedo (por ejemplo `riesgo_por_operacoin`) no pase en silencio con el
 from __future__ import annotations
 
 import os
-import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 no trae lector de TOML: se usa el paquete tomli
+    import tomli as tomllib
 
 ACCOUNTS = ("papel", "demo", "real")
 MODES = ("sugerir", "autonomo")

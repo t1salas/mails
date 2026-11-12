@@ -92,12 +92,16 @@ def ci_get(data: Any, *names: str, default: Any = None) -> Any:
     return default
 
 
-_FRACTION = re.compile(r"(\.\d{6})\d+")
+_FRACTION = re.compile(r"\.(\d+)")
 
 
 def parse_datetime(value: str) -> datetime:
-    """ISO 8601 tolerante (fracciones de 7 dígitos, 'Z', sin zona = UTC)."""
-    value = _FRACTION.sub(r"\1", value.strip()).replace("Z", "+00:00")
+    """ISO 8601 tolerante: fracciones de cualquier largo, 'Z', espacio o 'T', sin zona = UTC.
+
+    Se normaliza a mano porque Python 3.10 solo acepta fracciones de 3 o 6 dígitos y no entiende 'Z'.
+    """
+    value = value.strip().replace("Z", "+00:00")
+    value = _FRACTION.sub(lambda m: "." + m.group(1)[:6].ljust(6, "0"), value, count=1)
     dt = datetime.fromisoformat(value)
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 

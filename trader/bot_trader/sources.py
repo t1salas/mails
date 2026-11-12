@@ -15,7 +15,7 @@ import httpx
 
 from bot_trader.config import Asset, Settings
 from bot_trader.db import Journal
-from bot_trader.etoro import EtoroClient
+from bot_trader.etoro import EtoroClient, parse_datetime
 from bot_trader.models import Candle, Headline
 
 log = logging.getLogger(__name__)
@@ -113,8 +113,7 @@ class CsvPrices(PriceSource):
                     values = [float(r[k]) for k in ("open", "high", "low", "close")]
                 except (KeyError, ValueError):
                     continue  # filas con "null" o vacías
-                dt = datetime.fromisoformat(date)
-                dt = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+                dt = parse_datetime(date)
                 try:
                     vol = float(r.get("volume") or 0)
                 except ValueError:

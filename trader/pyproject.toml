@@ -2,10 +2,11 @@
 name = "bot-trader"
 version = "0.1.0"
 description = "Bot trader: analiza tendencias, probabilidades y noticias; sugiere o ejecuta operaciones en eToro"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
     "httpx>=0.27",
     "numpy>=1.26",
+    "tomli>=2.0; python_version < '3.11'",  # lector de TOML para Python 3.10
 ]
 
 [project.optional-dependencies]

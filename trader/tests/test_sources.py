@@ -51,7 +51,7 @@ def test_yahoo_empty_result_is_an_error():
 def test_csv_prices(tmp_path):
     (tmp_path / "AAPL.csv").write_text(
         "Date,Open,High,Low,Close,Adj Close,Volume\n"
-        "2026-01-06,2,3,1,2.5,2.5,10\n"
+        "2026-01-06T00:00:00Z,2,3,1,2.5,2.5,10\n"
         "2026-01-05,1,2,0.5,1.5,1.5,null\n"
         "2026-01-07,null,null,null,null,null,null\n",
         encoding="utf-8",

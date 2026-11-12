@@ -101,6 +101,10 @@ def test_candles_parsing(fake):
     assert "/candles/asc/OneDay/1000" in fake.requests[0].url.path
     assert bars[-1].close == 1.8 and bars[-1].date.microsecond == 123456
     assert parse_datetime("2026-01-01T00:00:00").tzinfo is not None
+    # Formatos que Python 3.10 no entiende por sí solo
+    assert parse_datetime("2026-01-01T10:20:30.5Z").microsecond == 500000
+    assert parse_datetime("2026-01-01 10:20:30.12+00:00").microsecond == 120000
+    assert parse_datetime("2026-01-05").day == 5
 
 
 def test_open_order_body_demo_vs_real(fake):
