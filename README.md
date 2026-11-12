@@ -66,3 +66,14 @@ config/           configuración de ejemplo de un negocio (TOML)
 deploy/           systemd, Caddy (HTTPS) y cron de respaldos
 tests/            pruebas (agenda, bot, webhook, recordatorios, panel)
 ```
+
+---
+
+## Otro proyecto en este repositorio: bot trader para eToro
+
+En [`trader/`](trader/README.md) hay un bot independiente con:
+
+- análisis de tendencias y probabilidades;
+- lectura de noticias;
+- gestión de riesgo;
+- ejecución opcional en eToro (papel → demo → real).

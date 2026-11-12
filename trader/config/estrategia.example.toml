@@ -1,0 +1,96 @@
+# Configuración del bot trader. Copia este archivo a config/estrategia.toml y ajústalo.
+# Las llaves secretas NO van aquí: van en el archivo .env (ver .env.example).
+
+[general]
+# Dónde opera:
+#   papel = simulación local, sin eToro (empieza aquí)
+#   demo  = cuenta demo de eToro, dinero virtual (necesita llaves de eToro de entorno Demo/Virtual)
+#   real  = dinero real (necesita además ETORO_CONFIRMO_DINERO_REAL=si en el .env)
+cuenta = "papel"
+# Qué hace con las señales:
+#   sugerir  = solo propone; tú apruebas con `python -m bot_trader aprobar <número>`
+#   autonomo = abre y cierra posiciones solo
+modo = "sugerir"
+# De dónde saca los precios: auto (eToro si hay llaves, si no Yahoo) | etoro | yahoo | csv
+fuente_precios = "auto"
+carpeta_csv = "datos"            # para fuente_precios = "csv": datos/AAPL.csv, ...
+intervalo = "OneDay"             # velas diarias: la estrategia está pensada para días/semanas
+velas = 1000                     # eToro da como máximo 1000 velas (~4 años en diario)
+capital_papel = 10000            # capital inicial de la cuenta simulada (USD)
+costo_por_lado = 0.0015          # spread + deslizamiento estimado por entrada y por salida (0.15 %)
+base_de_datos = "trader.db"      # bitácora (relativa a este archivo)
+vigencia_sugerencias_horas = 24  # después de esto una sugerencia ya no se puede aprobar
+desvio_maximo_precio = 0.015     # al aprobar: si el precio ya corrió más de 1.5 % a favor, no se persigue
+
+[riesgo]
+riesgo_por_operacion = 0.01      # si salta el stop se pierde ~1 % del capital. Lo sano: 0.5 %-2 %
+max_posiciones = 5
+max_por_activo = 0.20            # máximo 20 % del capital en un solo activo
+max_exposicion_total = 0.80      # máximo 80 % del capital invertido a la vez
+perdida_diaria_maxima = 0.03     # con -3 % en el día no abre nada más hasta mañana
+drawdown_maximo = 0.15           # con -15 % desde el máximo el bot se pausa hasta que lo reanudes
+apalancamiento = 1               # 1 = sin apalancamiento (recomendado)
+permitir_cortos = false          # ventas en corto (CFD): apagadas por defecto
+monto_minimo = 50                # no abre posiciones más chicas que esto (USD)
+monto_maximo_real = 250          # tope duro por orden en la cuenta real (USD)
+capital_maximo_bot = 0           # 0 = usa todo el capital de la cuenta; p. ej. 2000 = el bot solo usa 2000 USD
+probabilidad_minima = 0.45       # probabilidad histórica mínima de terminar en ganancia
+expectativa_minima = 0.10        # ganancia esperada mínima, en R (1R = lo arriesgado), ya con costos
+muestras_minimas = 30            # casos históricos parecidos mínimos para creerle a la estadística
+enfriamiento_horas = 24          # no reentrar a un activo hasta pasadas estas horas desde el cierre
+
+[estrategia]
+media_rapida = 50
+media_lenta = 200
+rsi = 14
+atr = 14
+stop_atr = 2.0                   # stop a 2 ATR del precio de entrada
+objetivo_atr = 4.0               # objetivo a 4 ATR: gana el doble de lo que arriesga
+horizonte = 20                   # velas máximas para medir cada operación histórica
+peso_noticias = 0.25             # cuánto pesan las noticias (máximo 0.5)
+umbral_entrada = 0.25            # puntaje combinado mínimo para entrar (de -1 a 1)
+umbral_salida = -0.15            # si el puntaje cae a esto, se cierra la posición
+rsi_sobrecompra = 75             # no compra con RSI arriba de esto
+rsi_sobreventa = 25              # no vende en corto con RSI abajo de esto
+
+[noticias]
+activas = true
+usar_ia = true                   # con ANTHROPIC_API_KEY lee las noticias con Claude; si no, palabras clave
+modelo = "claude-opus-5-5"
+max_titulares = 8
+horas = 72                       # solo noticias de los últimos 3 días
+idioma = "en"                    # en | es  (en inglés hay mucha más cobertura financiera)
+refrescar_horas = 4              # reusa la última lectura de noticias durante 4 h (menos llamadas a Claude)
+
+# Lista de activos a vigilar. `noticias` es lo que se busca en Google News.
+# Si el símbolo en eToro o en Yahoo es distinto, usa simbolo_etoro / simbolo_yahoo.
+[[activos]]
+simbolo = "SPY"
+nombre = "S&P 500 ETF"
+noticias = "S&P 500 stock market"
+
+[[activos]]
+simbolo = "QQQ"
+nombre = "Nasdaq 100 ETF"
+noticias = "Nasdaq 100 tech stocks"
+
+[[activos]]
+simbolo = "AAPL"
+nombre = "Apple"
+noticias = "Apple AAPL stock"
+
+[[activos]]
+simbolo = "MSFT"
+nombre = "Microsoft"
+noticias = "Microsoft MSFT stock"
+
+[[activos]]
+simbolo = "NVDA"
+nombre = "Nvidia"
+noticias = "Nvidia NVDA stock"
+
+[[activos]]
+simbolo = "BTC"
+nombre = "Bitcoin"
+noticias = "Bitcoin price"
+simbolo_yahoo = "BTC-USD"
