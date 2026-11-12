@@ -68,6 +68,7 @@ class Broker(ABC):
         price: float,
         stop: float | None,
         target: float | None,
+        trailing: bool = False,
     ) -> Fill: ...
 
     @abstractmethod
@@ -109,7 +110,7 @@ class PaperBroker(Broker):
         equity = self.cash + sum(p.value for p in positions)
         return Account(equity=equity, cash=self.cash, positions=positions)
 
-    def open(self, symbol, instrument_id, is_buy, amount, leverage, price, stop, target) -> Fill:
+    def open(self, symbol, instrument_id, is_buy, amount, leverage, price, stop, target, trailing=False) -> Fill:
         if amount > self.cash:
             return Fill(False, message="efectivo insuficiente en la cuenta de papel")
         fill_price = price * (1 + self.cost) if is_buy else price * (1 - self.cost)
@@ -125,6 +126,8 @@ class PaperBroker(Broker):
             stop=stop,
             target=target,
             opened_at=now_utc(),
+            trailing=trailing and stop is not None,
+            trail_distance=abs(price - stop) if trailing and stop is not None else None,
         )
         self.journal.add_position(position)
         self._set_cash(self.cash - position.amount)
@@ -146,21 +149,32 @@ class PaperBroker(Broker):
             if bars:
                 last = bars[-1]  # el precio actual cuenta aunque la vela sea la del día de entrada
                 later.append(Candle(last.date, last.close, last.close, last.close, last.close))
+            # Se recorre desde el stop inicial cada vez: así el resultado no depende de cuántas
+            # veces corra el ciclo (el stop móvil se recalcula igual que en el backtest).
+            stop = self.journal.initial_stop(p.id) if p.trailing else p.stop
+            label = "stop móvil alcanzado" if p.trailing else "stop alcanzado"
+            hit = None
             for c in later:
-                hit = None
                 if p.is_buy:
-                    if p.stop is not None and c.low <= p.stop:
-                        hit = (min(c.open, p.stop), "stop alcanzado")
+                    if stop is not None and c.low <= stop:
+                        hit = (min(c.open, stop), label)
                     elif p.target is not None and c.high >= p.target:
                         hit = (max(c.open, p.target), "objetivo alcanzado")
+                    elif p.trailing and p.trail_distance:
+                        stop = max(stop, c.high - p.trail_distance)
                 else:
-                    if p.stop is not None and c.high >= p.stop:
-                        hit = (max(c.open, p.stop), "stop alcanzado")
+                    if stop is not None and c.high >= stop:
+                        hit = (max(c.open, stop), label)
                     elif p.target is not None and c.low <= p.target:
                         hit = (min(c.open, p.target), "objetivo alcanzado")
+                    elif p.trailing and p.trail_distance:
+                        stop = min(stop, c.low + p.trail_distance)
                 if hit:
-                    exits.append(self.close(p, hit[0], hit[1]))
                     break
+            if hit:
+                exits.append(self.close(p, hit[0], hit[1]))
+            elif p.trailing and stop is not None and stop != p.stop:
+                self.journal.update_stop(p.id, stop)
         return exits
 
 
@@ -202,6 +216,10 @@ class EtoroBroker(Broker):
                 continue
             pnl_info = ci_get(raw, "unrealizedPnL", default={}) or {}
             p.pnl = float(ci_get(pnl_info, "pnL", "pnl", default=0) or 0)
+            live_stop = ci_get(raw, "stopLossRate")
+            if live_stop and not ci_get(raw, "isNoStopLoss", default=False) and live_stop != p.stop:
+                p.stop = float(live_stop)  # con stop móvil, eToro lo va moviendo
+                self.journal.update_stop(p.id, p.stop)
             close_rate = ci_get(pnl_info, "closeRate")
             p.current_price = float(close_rate) if close_rate else prices.get(p.symbol)
             mine.append(p)
@@ -221,7 +239,9 @@ class EtoroBroker(Broker):
                 continue
             self._apply_order_info(order["simbolo"], info, order_row=order)
 
-    def _apply_order_info(self, symbol: str, info: dict, order_row=None, stop=None, target=None) -> Fill:
+    def _apply_order_info(
+        self, symbol: str, info: dict, order_row=None, stop=None, target=None, trailing: bool = False
+    ) -> Fill:
         status = ci_get(ci_get(info, "status", default={}), "id")
         if status in (ORDER_FILLED, ORDER_PARTIAL):
             execs = ci_get(info, "positionExecutions", default=[]) or []
@@ -245,7 +265,10 @@ class EtoroBroker(Broker):
                 stop=ci_get(ex, "stopLossRate") if stop is None else stop,
                 target=ci_get(ex, "takeProfitRate") if target is None else target,
                 opened_at=now_utc(),
+                trailing=trailing,
             )
+            if trailing and position.stop is not None and price:
+                position.trail_distance = abs(price - float(position.stop))
             self.journal.add_position(position)
             if order_row is not None:
                 self.journal.update_order(order_row["id"], "ejecutada", position.id, info)
@@ -258,13 +281,14 @@ class EtoroBroker(Broker):
             return Fill(False, message=f"eToro rechazó la orden: {msg}", detail=info)
         return Fill(False, pending=True, message="orden enviada; esperando ejecución", detail=info)
 
-    def open(self, symbol, instrument_id, is_buy, amount, leverage, price, stop, target) -> Fill:
+    def open(self, symbol, instrument_id, is_buy, amount, leverage, price, stop, target, trailing=False) -> Fill:
         if instrument_id is None:
             return Fill(False, message=f"no conozco el id de eToro de {symbol}")
         reference = str(uuid.uuid4())
         try:
             ack = self.client.open_market_order(
-                instrument_id, is_buy, amount, leverage, stop_loss=stop, take_profit=target, request_id=reference
+                instrument_id, is_buy, amount, leverage, stop_loss=stop, take_profit=target, request_id=reference,
+                trailing=trailing,
             )
         except EtoroError as exc:
             return Fill(False, message=str(exc), reference=reference)
@@ -277,7 +301,7 @@ class EtoroBroker(Broker):
         except EtoroError as exc:
             log.warning("No pude confirmar la orden %s: %s", order_id, exc)
             info = {}
-        fill = self._apply_order_info(symbol, info, stop=stop, target=target)
+        fill = self._apply_order_info(symbol, info, stop=stop, target=target, trailing=trailing)
         fill.reference = reference
         fill.broker_order = str(order_id) if order_id is not None else None
         return fill

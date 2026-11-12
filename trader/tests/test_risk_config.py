@@ -5,7 +5,8 @@ import pytest
 from bot_trader.config import ConfigError, RiskParams, load_settings
 from bot_trader.db import Journal
 from bot_trader.models import Position
-from bot_trader.risk import RiskState, check_guards, position_size
+from bot_trader.models import Probability, Regime, Signal
+from bot_trader.risk import RiskState, TradeContext, check_guards, position_size, risk_budget, size_trade
 from tests.conftest import START
 
 
@@ -15,13 +16,13 @@ def pos(symbol, amount, leverage=1):
 
 def test_size_from_risk_per_trade():
     # 10 000 x 1 % / 5 % de distancia al stop = 2 000
-    d = position_size(10_000, 10_000, [], 100, 95, "A", RiskParams(max_asset_exposure=0.5), False)
+    d = position_size(10_000, 10_000, [], 100, 95, "A", RiskParams(risk_per_trade=0.01, max_asset_exposure=0.5), False)
     assert d.ok and d.amount == pytest.approx(2000)
     assert "100.00 USD" in d.reason
 
 
 def test_size_caps():
-    rp = RiskParams()
+    rp = RiskParams(risk_per_trade=0.01, max_positions=5)
     d = position_size(10_000, 10_000, [], 100, 99, "A", rp, False)  # stop muy cerca -> tope por activo
     assert d.amount == pytest.approx(2000) and "máximo por activo" in d.reason
     d = position_size(10_000, 300, [], 100, 95, "A", rp, False)
@@ -117,3 +118,62 @@ def test_real_account_needs_explicit_confirmation(tmp_path, monkeypatch):
         load_settings(cfg).validate()
     monkeypatch.setenv("ETORO_CONFIRMO_DINERO_REAL", "si")
     load_settings(cfg).validate()
+
+
+def _prob(p=0.5, win=2.5, loss=1.0):
+    return Probability(p, p * win - (1 - p) * loss, 100, 0.4, 0.2, 0.4, avg_win_r=win, avg_loss_r=loss)
+
+
+def test_risk_budget_adjustments():
+    rp = RiskParams(risk_per_trade=0.01, kelly_fraction=0)
+    assert risk_budget(rp, TradeContext(), None) == (0.01, [])
+    risk, notes = risk_budget(rp, TradeContext(drawdown=0.075), None)  # mitad del drawdown máximo
+    assert risk == pytest.approx(0.005) and "bajo su máximo" in notes[0]
+    defensive = Regime("defensivo", -0.3, 0.5, applies=True)
+    assert risk_budget(rp, TradeContext(regime=defensive), None)[0] == pytest.approx(0.005)
+    assert risk_budget(rp, TradeContext(regime=Regime("defensivo", -0.3, 0.5, applies=False)), None)[0] == 0.01
+    risk, notes = risk_budget(rp, TradeContext(correlations={"SPY": 0.75}), None)
+    assert risk == pytest.approx(0.005) and "SPY" in notes[0]
+    risk, notes = risk_budget(rp, TradeContext(correlations={"SPY": 0.9}), None)
+    assert risk == 0 and "casi igual" in notes[0]
+
+
+def test_kelly_caps_and_vetoes():
+    rp = RiskParams(risk_per_trade=0.02, kelly_fraction=0.25)
+    weak = _prob(0.30, win=2.5, loss=1.0)  # ventaja 0.05R -> Kelly 0.02 -> 1/4 = 0.5 %
+    risk, notes = risk_budget(rp, TradeContext(), weak)
+    assert risk == pytest.approx(0.25 * weak.kelly) and "Kelly" in notes[0]
+    assert risk_budget(rp, TradeContext(), _prob(0.2, 2.5, 1.0))[0] == 0  # sin ventaja, no se arriesga
+
+
+def test_volatility_target_shrinks_volatile_assets():
+    rp = RiskParams(risk_per_trade=0.01, kelly_fraction=0, max_positions=4, vol_target=0.12)
+    sig = Signal("X", "COMPRAR", 100, stop=95, probability=_prob(0.5))
+    calm = size_trade(10_000, 10_000, [], sig, rp, TradeContext(annual_vol=0.15), False)
+    wild = size_trade(10_000, 10_000, [], sig, rp, TradeContext(annual_vol=0.60), False)
+    assert calm.amount == pytest.approx(2000)  # 1 % de riesgo con stop a 5 % (y tope por activo)
+    assert wild.amount == pytest.approx(10_000 * 0.12 / (0.60 * 2))  # 1 000: la volatilidad manda
+    assert "volatilidad objetivo" in wild.reason
+
+
+def test_old_journal_is_migrated(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "viejo.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        "CREATE TABLE posiciones (id TEXT NOT NULL, cuenta TEXT NOT NULL, simbolo TEXT NOT NULL, "
+        "instrument_id INTEGER, es_compra INTEGER NOT NULL, monto REAL NOT NULL, unidades REAL NOT NULL, "
+        "apalancamiento INTEGER NOT NULL DEFAULT 1, precio_entrada REAL NOT NULL, stop REAL, objetivo REAL, "
+        "abierta TEXT NOT NULL, cerrada TEXT, precio_salida REAL, pnl REAL, motivo_cierre TEXT, "
+        "PRIMARY KEY (id, cuenta));"
+        "INSERT INTO posiciones VALUES ('1','papel','SPY',NULL,1,100,1,1,100,90,120,'2026-01-01T00:00:00+00:00',"
+        "NULL,NULL,NULL,NULL);"
+    )
+    conn.commit()
+    conn.close()
+    j = Journal(path, "papel")
+    old = j.open_positions()[0]
+    assert old.symbol == "SPY" and not old.trailing and j.initial_stop("1") == 90
+    j.add_position(pos("QQQ", 100))
+    assert len(j.open_positions()) == 2

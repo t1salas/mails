@@ -5,6 +5,7 @@ description = "Bot trader: analiza tendencias, probabilidades y noticias; sugier
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
+    "numpy>=1.26",
 ]
 
 [project.optional-dependencies]

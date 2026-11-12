@@ -1,8 +1,8 @@
 """Comandos del bot.  Uso:  python -m bot_trader <comando> [opciones]
 
   analizar           analiza la lista de activos y explica qué haría (no guarda ni opera)
-  ciclo              corre un ciclo completo: sugiere u opera según `modo`
-  correr             repite el ciclo cada N minutos (para dejarlo prendido)
+  ciclo              decide ahora: sugiere u opera según `modo`
+  correr             el agente: vigila cada N minutos y decide una vez al día
   aprobar ID         ejecuta una sugerencia
   estado             capital, posiciones del bot y frenos de riesgo
   diario             últimas señales, órdenes y operaciones cerradas
@@ -21,12 +21,19 @@ import os
 import sys
 import time
 
-from bot_trader.backtest import run_backtest
+from bot_trader.backtest import robustness, run_backtest
 from bot_trader.config import ConfigError, Settings, load_settings
 from bot_trader.engine import build_bot, describe_age
 from bot_trader.etoro import EtoroClient, EtoroError, ci_get
 from bot_trader.notify import send_telegram
-from bot_trader.report import ACCOUNT_LABEL, analysis_detail, analysis_line, backtest_report, cycle_report
+from bot_trader.report import (
+    ACCOUNT_LABEL,
+    analysis_detail,
+    analysis_line,
+    backtest_report,
+    cycle_report,
+    robustness_report,
+)
 from bot_trader.risk import check_guards
 from bot_trader.db import now_utc
 
@@ -42,12 +49,17 @@ def _settings(args) -> Settings:
 def cmd_analizar(args) -> int:
     settings = _settings(args)
     bot = build_bot(settings)
-    candles, errors = bot.fetch_candles(settings.assets)
+    candles, errors, reference = bot.fetch_market()
     prices = {s: b[-1].close for s, b in candles.items()}
     account = bot.broker.account(prices)
+    analyst = bot.build_analyst(candles, reference)
     news = bot.read_news([a for a in settings.assets if a.symbol in candles])
-    analyses = bot.analyze(candles, errors, account.positions, news)
+    analyses = bot.analyze(analyst, errors, account.positions, news)
     print(f"== Análisis ({len(analyses)} activos, precios de {bot.prices.name}) ==")
+    if analyst.ref is not None:
+        regime = analyst.market_regime(analyst.ref_dates[-1])
+        print(f"Mercado: {regime.label} ({regime.detail})")
+    print(bot.model_summary(analyst))
     for a in analyses:
         print("  " + analysis_line(a))
     print()
@@ -58,9 +70,9 @@ def cmd_analizar(args) -> int:
     return 0
 
 
-def _run_once(settings: Settings, quiet_unless_noteworthy: bool = False) -> int:
+def _run_once(settings: Settings, quiet_unless_noteworthy: bool = False, force_decision: bool = False) -> int:
     bot = build_bot(settings)
-    result = bot.run_cycle()
+    result = bot.run_cycle(force_decision=force_decision)
     text = cycle_report(result)
     print(text)
     if result.noteworthy or not quiet_unless_noteworthy:
@@ -71,13 +83,16 @@ def _run_once(settings: Settings, quiet_unless_noteworthy: bool = False) -> int:
 
 
 def cmd_ciclo(args) -> int:
-    return _run_once(_settings(args))
+    # Corrido a mano, decide en ese momento (si el mercado está abierto, con la vela del día en curso).
+    return _run_once(_settings(args), force_decision=True)
 
 
 def cmd_correr(args) -> int:
     settings = _settings(args)
     minutes = max(args.cada_minutos, 1)
-    print(f"Corriendo cada {minutes} min. Ctrl+C para detener.")
+    hour = settings.decision_hour_utc
+    when = "en cada ciclo" if hour < 0 else f"una vez al día desde las {hour:02d}:00 UTC"
+    print(f"Agente corriendo: vigila cada {minutes} min y decide {when}. Ctrl+C para detener.")
     while True:
         try:
             _run_once(_settings(args), quiet_unless_noteworthy=True)
@@ -117,8 +132,10 @@ def cmd_estado(args) -> int:
         print(f"Motivo de la pausa: {bot.risk.pause_reason}")
     print(f"Posiciones del bot ({len(account.positions)}):")
     for p in account.positions:
+        stop = f"{p.stop:,.2f}" if p.stop is not None else "-"
+        exits = f"stop móvil {stop}" if p.trailing else f"stop {stop}  objetivo {p.target if p.target is not None else '-'}"
         print(f"  {p.symbol:<8} {'compra' if p.is_buy else 'corto':<6} {p.amount:>10,.2f} USD  P&L {p.pnl:+,.2f}  "
-              f"stop {p.stop}  objetivo {p.target}  desde {p.opened_at:%Y-%m-%d}")
+              f"{exits}  desde {p.opened_at:%Y-%m-%d}")
     print(f"P&L realizado acumulado: {bot.journal.realized_pnl():+,.2f} USD")
     return 0
 
@@ -150,11 +167,14 @@ def cmd_backtest(args) -> int:
         settings.assets = [a for a in settings.assets if a.symbol in wanted]
     settings.news.enabled = False
     bot = build_bot(settings)
-    candles, errors = bot.fetch_candles(settings.assets)
+    candles, errors, reference = bot.fetch_market()
     for sym, err in errors.items():
         print(f"{sym}: {err}")
-    res = run_backtest(settings, candles, initial=args.capital)
+    res = run_backtest(settings, candles, initial=args.capital, reference=reference)
     print(backtest_report(res, sorted(candles)))
+    if args.robustez:
+        print()
+        print(robustness_report(robustness(settings, candles, reference)))
     return 0
 
 
@@ -241,7 +261,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("analizar").set_defaults(fn=cmd_analizar)
     sub.add_parser("ciclo").set_defaults(fn=cmd_ciclo)
     p = sub.add_parser("correr")
-    p.add_argument("--cada-minutos", type=int, default=60)
+    p.add_argument("--cada-minutos", type=int, default=30)
     p.set_defaults(fn=cmd_correr)
     p = sub.add_parser("aprobar")
     p.add_argument("id", type=int)
@@ -253,6 +273,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("backtest")
     p.add_argument("--simbolos", help="solo estos símbolos, separados por coma")
     p.add_argument("--capital", type=float, default=None)
+    p.add_argument("--robustez", action="store_true", help="repite con variaciones de parámetros")
     p.set_defaults(fn=cmd_backtest)
     sub.add_parser("verificar-etoro").set_defaults(fn=cmd_verificar)
     p = sub.add_parser("buscar")
@@ -266,6 +287,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--si", action="store_true")
     p.set_defaults(fn=cmd_cerrar_todo)
     args = parser.parse_args(argv)
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)  # que el log del servicio salga al momento
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     try:

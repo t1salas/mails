@@ -50,15 +50,20 @@ def cycle_report(r: CycleResult, detailed: bool = True) -> str:
     ]
     if r.guard and not r.guard.can_open:
         out.append(f"FRENO DE RIESGO: {r.guard.reason}")
+    if r.regime is not None and r.regime.label != "sin referencia":
+        out.append(f"Mercado: {r.regime.label} ({r.regime.detail})")
+    if r.model_info:
+        out.append(r.model_info.capitalize())
     out += r.notes
     if r.positions:
         out.append("")
         out.append("Posiciones abiertas:")
         for p in r.positions:
             side = "compra" if p.is_buy else "corto"
+            exit_text = f"stop móvil {_money(p.stop)}" if p.trailing else f"stop {_money(p.stop)}  objetivo {_money(p.target)}"
             out.append(
                 f"  {p.symbol:<8} {side:<6} invertido {_money(p.amount)}  entrada {p.entry_price:,.4f}  "
-                f"actual {_money(p.current_price)}  P&L {p.pnl:+,.2f}  stop {_money(p.stop)}  objetivo {_money(p.target)}"
+                f"actual {_money(p.current_price)}  P&L {p.pnl:+,.2f}  {exit_text}"
             )
     if r.exits:
         out.append("")
@@ -77,6 +82,8 @@ def cycle_report(r: CycleResult, detailed: bool = True) -> str:
             out.append(f"  [{tag}{ident}] {ACTION_LABEL.get(a.action, a.action)} {a.symbol}{amount}: {a.detail}")
         if any(a.kind == "sugerida" and a.signal_id for a in r.actions):
             out.append("  Para ejecutar una sugerencia:  python -m bot_trader aprobar <número>")
+    if not r.analyses:
+        return "\n".join(out)
     out.append("")
     out.append("Análisis:")
     out += ["  " + analysis_line(a) for a in r.analyses]
@@ -93,46 +100,105 @@ def backtest_report(res: BacktestResult, symbols: list[str]) -> str:
     if res.start is None:
         return "No hay datos suficientes para el backtest (hacen falta ~400 velas por activo)."
     pf = "∞" if res.profit_factor == float("inf") else f"{res.profit_factor:.2f}"
+    b = res.benchmark_stats
     lines = [
         f"== Backtest {', '.join(symbols)} | {res.start} a {res.end} ({res.years:.1f} años) ==",
-        f"Capital inicial {res.initial:,.2f} -> final {res.final:,.2f}",
-        f"Rendimiento total {res.total_return:+.1%}   anual (CAGR) {res.cagr:+.1%}",
-        f"Peor caída (drawdown) {res.max_dd:.1%}   Sharpe {res.sharpe:.2f}   Tiempo invertido {res.exposure:.0%}",
-        f"Operaciones {len(res.trades)}   Ganadoras {res.win_rate:.0%}   Factor de ganancia {pf}   Promedio {res.avg_r:+.2f}R",
-        f"Comprar y mantener (mismos activos, partes iguales): {res.benchmark_return:+.1%}, peor caída {res.benchmark_max_dd:.1%}",
+        f"Capital inicial {res.initial:,.2f} -> final {res.final:,.2f}  ({res.total_return:+.1%})",
+        "",
+        "                      Bot        Comprar y mantener",
+        f"  Rendimiento anual  {res.cagr:>+7.1%}     {b['cagr']:>+7.1%}",
+        f"  Volatilidad anual  {res.annual_vol:>7.1%}     {b['vol']:>7.1%}",
+        f"  Peor caída         {res.max_dd:>7.1%}     {b['max_dd']:>7.1%}",
+        f"  Sharpe             {res.sharpe:>7.2f}     {b['sharpe']:>7.2f}",
+        f"  Sortino            {res.sortino:>7.2f}     {b['sortino']:>7.2f}",
+        f"  Calmar (anual/caída) {res.calmar:>5.2f}     {b.get('calmar', 0):>7.2f}",
+        "",
+        "Sostenibilidad:",
+        f"  Meses positivos {res.positive_months:.0%}   Mayor tiempo bajo el máximo {res.longest_underwater_days} días   "
+        f"Tiempo invertido {res.exposure:.0%}",
+        "  Por año: " + "   ".join(f"{y} {r:+.1%}" for y, r in res.yearly),
+        "",
+        "Operaciones:",
+        f"  {len(res.trades)} operaciones   ganadoras {res.win_rate:.0%}   factor de ganancia {pf}   "
+        f"promedio {res.avg_r:+.2f}R   duración media {res.avg_days:.0f} días",
     ]
     if res.would_pause_on:
-        lines.append(f"Ojo: el {res.would_pause_on} el bot en vivo se habría pausado por drawdown.")
+        lines.append(f"  Ojo: el {res.would_pause_on} el bot en vivo se habría pausado por drawdown.")
     by_symbol: dict[str, list] = {}
     for t in res.trades:
         by_symbol.setdefault(t.symbol, []).append(t)
-    if by_symbol:
+    for sym, trades in sorted(by_symbol.items()):
+        wins = sum(1 for t in trades if t.pnl > 0)
+        lines.append(
+            f"  {sym:<8} {len(trades):>3} operaciones  ganadoras {wins / len(trades):.0%}  "
+            f"P&L {sum(t.pnl for t in trades):+,.2f}  promedio {sum(t.r for t in trades) / len(trades):+.2f}R"
+        )
+    lines += ["", *prediction_lines(res), "", _verdict(res)]
+    return "\n".join(lines)
+
+
+def prediction_lines(res: BacktestResult) -> list[str]:
+    q = res.prediction_quality()
+    if not q["n"] or q["base"] is None:
+        return ["Calidad de las predicciones: sin datos suficientes."]
+
+    def skill(key: str) -> str:
+        v = q.get(f"{key}_skill")
+        return "-" if v is None else f"{v:+.1%}"
+
+    lines = [
+        f"Calidad de las predicciones ({q['n']:,} días evaluados, siempre sin mirar el futuro):",
+        f"  Mejora sobre la tasa base: combinada {skill('final')}  |  casos parecidos {skill('hist')}  |  "
+        f"modelo estadístico {skill('model')}",
+        "  (positivo = predice mejor que suponer siempre el promedio; en mercados +1 % a +5 % ya es ventaja)",
+    ]
+    if q["calibration"]:
+        lines.append("  Calibración (lo que predijo vs. lo que pasó):")
+        for lo, hi, n, pred, real in q["calibration"]:
+            hi_txt = "100%" if hi > 1 else f"{hi:.0%}"
+            lines.append(f"    predijo {lo:.0%}-{hi_txt}: {n:>5} casos, promedio predicho {pred:.0%}, ganó realmente {real:.0%}")
+    return lines
+
+
+def robustness_report(results: list) -> str:
+    lines = ["== Robustez: ¿sigue funcionando si cambian un poco los parámetros? ==",
+             f"  {'variante':<26}{'anual':>8}{'caída':>8}{'Calmar':>8}{'Sharpe':>8}{'operac.':>9}"]
+    calmars = []
+    for label, r in results:
+        if r.start is None:
+            lines.append(f"  {label:<26} sin datos")
+            continue
+        calmars.append(r.calmar)
+        lines.append(f"  {label:<26}{r.cagr:>+8.1%}{r.max_dd:>8.1%}{r.calmar:>8.2f}{r.sharpe:>8.2f}{len(r.trades):>9}")
+    if calmars:
+        bad = sum(1 for c in calmars if c <= 0)
         lines.append("")
-        lines.append("Por activo:")
-        for sym, trades in sorted(by_symbol.items()):
-            wins = sum(1 for t in trades if t.pnl > 0)
-            lines.append(
-                f"  {sym:<8} {len(trades):>3} operaciones  ganadoras {wins / len(trades):.0%}  "
-                f"P&L {sum(t.pnl for t in trades):+,.2f}  promedio {sum(t.r for t in trades) / len(trades):+.2f}R"
-            )
-    lines.append("")
-    lines.append(_verdict(res))
+        if bad == 0:
+            lines.append("Veredicto: robusta. Todas las variantes ganan; la ventaja no depende de números exactos.")
+        elif bad <= len(calmars) // 3:
+            lines.append(f"Veredicto: aceptable. {bad} de {len(calmars)} variantes pierden; revisa cuáles.")
+        else:
+            lines.append(f"Veredicto: FRÁGIL. {bad} de {len(calmars)} variantes pierden: probablemente está "
+                         "sobreajustada al pasado. No la uses con dinero real así.")
     return "\n".join(lines)
 
 
 def _verdict(res: BacktestResult) -> str:
+    b = res.benchmark_stats
     if len(res.trades) < 20:
         return ("Veredicto: muy pocas operaciones para sacar conclusiones. Agrega activos o más historia "
                 "antes de confiar en estos números.")
     if res.avg_r <= 0 or res.profit_factor < 1:
         return "Veredicto: la estrategia PIERDE en este periodo. No la uses con dinero real con estos parámetros."
-    if res.total_return < res.benchmark_return:
-        if res.max_dd >= res.benchmark_max_dd:
-            return ("Veredicto: gana, pero menos que comprar y mantener y sin caer menos. "
-                    "Para estos activos, invertir y esperar fue mejor.")
-        return (f"Veredicto: gana ({res.total_return:+.1%}) pero menos que comprar y mantener "
-                f"({res.benchmark_return:+.1%}); a cambio cae menos ({res.max_dd:.1%} contra "
-                f"{res.benchmark_max_dd:.1%}) y no está invertido todo el tiempo. Decide si ese "
-                "intercambio te conviene antes de usarla.")
-    return ("Veredicto: le ganó a comprar y mantener en este periodo. Siguiente paso: correrla varias "
-            "semanas en DEMO y comparar con estos números antes de pasar a real con montos chicos.")
+    losing_years = sum(1 for _, r in res.yearly if r < 0)
+    consistency = f"{len(res.yearly) - losing_years} de {len(res.yearly)} años positivos"
+    if res.calmar >= b.get("calmar", 0) and res.sharpe >= b["sharpe"]:
+        return (f"Veredicto: SOSTENIBLE en este periodo: mejor rendimiento por unidad de riesgo que comprar y "
+                f"mantener (Calmar {res.calmar:.2f} vs {b.get('calmar', 0):.2f}), {consistency}. Siguiente paso: "
+                "`--robustez`, luego semanas en DEMO comparando con estos números.")
+    if res.max_dd < b["max_dd"]:
+        return (f"Veredicto: gana ({res.cagr:+.1%} anual) con caídas más chicas ({res.max_dd:.1%} vs "
+                f"{b['max_dd']:.1%}), pero rinde menos por unidad de riesgo que comprar y mantener. {consistency}. "
+                "Decide si ese intercambio te conviene.")
+    return ("Veredicto: gana, pero comprar y mantener fue mejor y con caídas parecidas o menores. "
+            "Para estos activos, invertir y esperar fue la opción más sostenible.")

@@ -53,4 +53,6 @@ def settings(tmp_path) -> Settings:
         db_path=str(tmp_path / "bot.db"),
     )
     s.news.enabled = False
+    s.decision_hour_utc = -1  # en pruebas se decide en cada ciclo
+    s.reference = ""  # sin mercado de referencia salvo que la prueba lo pida
     return s

@@ -1,5 +1,9 @@
-# Configuración del bot trader. Copia este archivo a config/estrategia.toml y ajústalo.
+# Configuración del agente trader. Copia este archivo a config/estrategia.toml y ajústalo.
 # Las llaves secretas NO van aquí: van en el archivo .env (ver .env.example).
+#
+# Perfil "sostenible": busca crecer de forma constante con caídas chicas, no la ganancia más
+# rápida. Opera poco (decide una vez al día), diversifica, deja correr las ganancias con stop
+# móvil y arriesga menos cuando las cosas van mal.
 
 [general]
 # Dónde opera:
@@ -8,13 +12,15 @@
 #   real  = dinero real (necesita además ETORO_CONFIRMO_DINERO_REAL=si en el .env)
 cuenta = "papel"
 # Qué hace con las señales:
+#   autonomo = abre y cierra posiciones solo (el agente)
 #   sugerir  = solo propone; tú apruebas con `python -m bot_trader aprobar <número>`
-#   autonomo = abre y cierra posiciones solo
-modo = "sugerir"
+modo = "autonomo"
+hora_decision_utc = 21           # decide una vez al día desde esta hora UTC (después del cierre de Wall Street)
+referencia = "SPY"               # activo que define si el mercado está alcista, defensivo o en crisis
 # De dónde saca los precios: auto (eToro si hay llaves, si no Yahoo) | etoro | yahoo | csv
 fuente_precios = "auto"
 carpeta_csv = "datos"            # para fuente_precios = "csv": datos/AAPL.csv, ...
-intervalo = "OneDay"             # velas diarias: la estrategia está pensada para días/semanas
+intervalo = "OneDay"             # velas diarias: la estrategia está pensada para semanas y meses
 velas = 1000                     # eToro da como máximo 1000 velas (~4 años en diario)
 capital_papel = 10000            # capital inicial de la cuenta simulada (USD)
 costo_por_lado = 0.0015          # spread + deslizamiento estimado por entrada y por salida (0.15 %)
@@ -23,30 +29,40 @@ vigencia_sugerencias_horas = 24  # después de esto una sugerencia ya no se pued
 desvio_maximo_precio = 0.015     # al aprobar: si el precio ya corrió más de 1.5 % a favor, no se persigue
 
 [riesgo]
-riesgo_por_operacion = 0.01      # si salta el stop se pierde ~1 % del capital. Lo sano: 0.5 %-2 %
-max_posiciones = 5
+riesgo_por_operacion = 0.0075    # si salta el stop se pierde ~0.75 % del capital (lo sano: 0.5 %-1 %)
+max_posiciones = 6
 max_por_activo = 0.20            # máximo 20 % del capital en un solo activo
 max_exposicion_total = 0.80      # máximo 80 % del capital invertido a la vez
+volatilidad_objetivo = 0.12      # tope por posición según su volatilidad: lo más volátil recibe menos
+correlacion_maxima = 0.85        # no compra algo que se mueve casi igual que lo que ya tiene
+correlacion_alta = 0.70          # si se parece bastante, arriesga la mitad
+fraccion_kelly = 0.25            # nunca arriesga más de 1/4 de lo que la ventaja estimada justificaría
+reducir_con_drawdown = true      # mientras más cae la cuenta desde su máximo, menos arriesga
+multiplicador_defensivo = 0.5    # con mercado bajista arriesga la mitad en lo que se mueve con el mercado
 perdida_diaria_maxima = 0.03     # con -3 % en el día no abre nada más hasta mañana
-drawdown_maximo = 0.15           # con -15 % desde el máximo el bot se pausa hasta que lo reanudes
+drawdown_maximo = 0.15           # con -15 % desde el máximo el agente se pausa hasta que lo reanudes
+detectar_desgaste = true         # se pausa solo si deja de acertar lo que sus probabilidades prometían
+operaciones_min_desgaste = 15    # operaciones cerradas necesarias antes de juzgar el desgaste
 apalancamiento = 1               # 1 = sin apalancamiento (recomendado)
 permitir_cortos = false          # ventas en corto (CFD): apagadas por defecto
 monto_minimo = 50                # no abre posiciones más chicas que esto (USD)
 monto_maximo_real = 250          # tope duro por orden en la cuenta real (USD)
 capital_maximo_bot = 0           # 0 = usa todo el capital de la cuenta; p. ej. 2000 = el bot solo usa 2000 USD
-probabilidad_minima = 0.45       # probabilidad histórica mínima de terminar en ganancia
+probabilidad_minima = 0.35       # con stop móvil se gana menos veces pero más: manda la expectativa
 expectativa_minima = 0.10        # ganancia esperada mínima, en R (1R = lo arriesgado), ya con costos
 muestras_minimas = 30            # casos históricos parecidos mínimos para creerle a la estadística
 enfriamiento_horas = 24          # no reentrar a un activo hasta pasadas estas horas desde el cierre
 
 [estrategia]
+estilo_salida = "seguimiento"    # seguimiento = stop móvil que deja correr ganancias | objetivo = stop y objetivo fijos
+stop_atr = 3.0                   # distancia del stop: 3 veces el movimiento diario típico (ATR)
+objetivo_atr = 6.0               # solo con estilo_salida = "objetivo"
+horizonte = 120                  # velas máximas al simular cada operación histórica
+desacuerdo_maximo = 0.15         # si los dos modelos difieren más que esto, no entra
 media_rapida = 50
 media_lenta = 200
 rsi = 14
 atr = 14
-stop_atr = 2.0                   # stop a 2 ATR del precio de entrada
-objetivo_atr = 4.0               # objetivo a 4 ATR: gana el doble de lo que arriesga
-horizonte = 20                   # velas máximas para medir cada operación histórica
 peso_noticias = 0.25             # cuánto pesan las noticias (máximo 0.5)
 umbral_entrada = 0.25            # puntaje combinado mínimo para entrar (de -1 a 1)
 umbral_salida = -0.15            # si el puntaje cae a esto, se cierra la posición
@@ -62,8 +78,10 @@ horas = 72                       # solo noticias de los últimos 3 días
 idioma = "en"                    # en | es  (en inglés hay mucha más cobertura financiera)
 refrescar_horas = 4              # reusa la última lectura de noticias durante 4 h (menos llamadas a Claude)
 
-# Lista de activos a vigilar. `noticias` es lo que se busca en Google News.
-# Si el símbolo en eToro o en Yahoo es distinto, usa simbolo_etoro / simbolo_yahoo.
+# Lista de activos: diversificada A PROPÓSITO. Lo sostenible viene de tener cosas que no se
+# mueven igual (acciones de EE. UU. y del mundo, oro, bonos, energía, cripto), no de apostar
+# todo a lo que más subió. Revisa con `python -m bot_trader verificar-etoro` que eToro los tenga;
+# si el símbolo en eToro o en Yahoo es distinto, usa simbolo_etoro / simbolo_yahoo.
 [[activos]]
 simbolo = "SPY"
 nombre = "S&P 500 ETF"
@@ -75,19 +93,34 @@ nombre = "Nasdaq 100 ETF"
 noticias = "Nasdaq 100 tech stocks"
 
 [[activos]]
-simbolo = "AAPL"
-nombre = "Apple"
-noticias = "Apple AAPL stock"
+simbolo = "IWM"
+nombre = "Russell 2000 ETF"
+noticias = "small cap stocks Russell 2000"
+
+[[activos]]
+simbolo = "EEM"
+nombre = "Emerging Markets ETF"
+noticias = "emerging markets stocks"
+
+[[activos]]
+simbolo = "GLD"
+nombre = "Gold ETF"
+noticias = "gold price"
+
+[[activos]]
+simbolo = "TLT"
+nombre = "20+ Year Treasury ETF"
+noticias = "Treasury bonds yields"
+
+[[activos]]
+simbolo = "XLE"
+nombre = "Energy Select ETF"
+noticias = "oil energy stocks"
 
 [[activos]]
 simbolo = "MSFT"
 nombre = "Microsoft"
 noticias = "Microsoft MSFT stock"
-
-[[activos]]
-simbolo = "NVDA"
-nombre = "Nvidia"
-noticias = "Nvidia NVDA stock"
 
 [[activos]]
 simbolo = "BTC"

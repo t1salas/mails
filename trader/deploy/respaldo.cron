@@ -1,0 +1,2 @@
+# Respaldo diario de la bitácora a las 3:20 (conserva 30 copias). Instalar con: sudo crontab -u trader deploy/respaldo.cron
+20 3 * * * cd /opt/trader && mkdir -p backups && sqlite3 config/trader.db ".backup backups/trader-$(date +\%F).db" && ls -1t backups/trader-*.db | tail -n +31 | xargs -r rm --

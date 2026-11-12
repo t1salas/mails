@@ -1,45 +1,64 @@
-# Bot trader para eToro
+# Agente trader para eToro
 
-Bot que vigila una lista de activos y hace cuatro cosas:
+Agente que opera solo y busca **ganancias sostenibles en el tiempo**, no las más rápidas. Sobre una lista diversificada de activos:
 
-- **Analiza la tendencia** de cada activo con medias móviles, pendiente, momentum, MACD y RSI.
-- **Calcula probabilidades**: revisa la historia del activo y responde "las otras veces que estuvo así, ¿cuántas veces ganó esta operación y cuánto en promedio?".
-- **Lee noticias** recientes (Google News y Yahoo Finance) con Claude o, sin IA, con palabras clave.
-- **Sugiere compras y ventas** con monto, stop y objetivo, explicando por qué. Si lo activas, también **ejecuta las operaciones solo** en eToro, primero en la cuenta demo.
+- **Analiza la tendencia** con medias móviles, momentum de 1 a 12 meses, MACD, RSI y volatilidad.
+- **Predice la probabilidad de ganar** con dos modelos independientes. Esa probabilidad se **calibra** con el historial real de aciertos del propio agente, y se mide qué tan buena es.
+- **Lee noticias** (Google News y Yahoo Finance) con Claude o, sin IA, con palabras clave.
+- **Administra el riesgo como un gestor de capital:**
+  - diversifica y evita correlaciones;
+  - limita cada posición según su volatilidad;
+  - usa Kelly fraccional para no arriesgar de más;
+  - arriesga menos cuando la cuenta cae o el mercado se pone bajista.
+- **Opera solo** en eToro (demo o real): decide una vez al día y vigila entre decisiones. Si deja de acertar lo que prometía, **se pausa solo**.
 
-> **Aviso.** Esto es una herramienta, no asesoría financiera. Ningún bot gana siempre; los mercados cambian y el rendimiento pasado no garantiza el futuro. Empieza en papel, sigue en demo y pasa a dinero real solo con montos que puedas perder.
+> **Aviso.** Esto es una herramienta, no asesoría financiera. Ningún sistema gana siempre: los mercados cambian y el rendimiento pasado no garantiza el futuro. Empieza en papel, sigue en demo y pasa a dinero real solo con montos que puedas perder.
 
-## Cómo piensa
+## La filosofía: sostenible antes que rápido
 
-Piensa como un trader disciplinado, no como un adivino:
+La ganancia más rápida casi siempre viene con caídas que te sacan del juego. Una caída de 50 % necesita una subida de 100 % solo para volver al punto de partida. Por eso el agente optimiza **rendimiento por unidad de riesgo** (Sharpe, Calmar) y **consistencia**, no la ganancia máxima.
 
-1. **Primero el riesgo y después la ganancia.** Cada operación arriesga una fracción fija del capital, 1 % por defecto. El tamaño de la posición se calcula a partir de la distancia al stop. Diez pérdidas seguidas dejan la cuenta en ~90 %, no en cero.
-2. **Solo entra con ventaja medible.** Debe cumplirse todo esto a la vez:
-   - la tendencia acompaña;
-   - en casos históricos parecidos la operación ganó más de lo que perdió, ya con costos;
-   - hay suficientes casos para creerle a la estadística;
-   - el precio no está en sobrecompra.
-3. **El stop y el objetivo se ponen al abrir.** Por defecto el stop va a 2 ATR y el objetivo a 4 ATR, así que cada operación busca ganar el doble de lo que arriesga. En eToro quedan puestos en la orden, aunque el bot se apague.
-4. **Las noticias pueden vetar, pero nunca mandan solas.** Pesan como máximo 25 %:
-   - una noticia buena no abre una operación si la tendencia y la probabilidad no acompañan;
-   - un evento de riesgo con noticias malas (demanda, investigación, resultados flojos) bloquea compras y puede cerrar una posición.
-5. **Frenos automáticos:**
-   - con −3 % en el día no abre nada más hasta mañana;
-   - con −15 % desde el máximo se **pausa** hasta que tú lo revises y lo reanudes;
-   - hay límites de posiciones, de exposición por activo y de exposición total.
-6. **Todo queda en una bitácora** (SQLite): cada señal con sus razones, cada orden y cada cierre con su P&L.
+| Principio | Cómo lo aplica el agente |
+|---|---|
+| **Sobrevivir primero** | Arriesga ~0.75 % del capital por operación. Con −3 % en el día no abre más; con −15 % desde el máximo se pausa. |
+| **Cortar pérdidas, dejar correr ganancias** | Usa un stop móvil a 3 ATR que sube detrás del precio. Gana menos veces (~35–45 %), pero las ganancias grandes pagan muchas pérdidas chicas. |
+| **Diversificar de verdad** | La lista incluye acciones de EE. UU. y del mundo, oro, bonos, energía y cripto. No compra algo que se mueve casi igual que lo que ya tiene. |
+| **Cada posición aporta un riesgo parecido** | Lo más volátil (cripto, por ejemplo) recibe montos más chicos que lo estable (bonos, índices). |
+| **No apostar de más aunque haya ventaja** | Nunca arriesga más de 1/4 de lo que justificaría el criterio de Kelly. |
+| **Protegerse en mal mercado** | Si el S&P 500 está bajista, arriesga la mitad en lo que se mueve con el mercado. En crisis no compra eso (el oro o los bonos sí pueden seguir). |
+| **Operar poco** | Decide una vez al día, después del cierre de Wall Street. Menos ruido, menos costos, menos errores. |
+| **Medirse y corregirse** | Calibra sus probabilidades con su historial real y se pausa si sus operaciones ganan mucho menos de lo prometido. |
 
-### Qué significan los números
+## Cómo predice (y cómo sabe si predice bien)
 
-`p=58% E=+0.35R n=112` quiere decir:
+Para cada activo y cada día, el agente responde: *"si entro hoy con este stop móvil, ¿qué probabilidad hay de terminar ganando y cuánto gano o pierdo en promedio?"*. Para eso usa:
 
-- **n=112**: en la historia del activo hubo 112 situaciones parecidas a la actual (misma fuerza de tendencia y RSI similar).
-- **p=58%**: en esas situaciones, entrar con el mismo stop y objetivo terminó en ganancia el 58 % de las veces.
-- **E=+0.35R**: la ganancia promedio fue 0.35 veces lo arriesgado, ya con costos. Si arriesgas 100 USD por operación, eso es +35 USD en promedio por operación, *si el futuro se parece al pasado*.
+1. **Casos parecidos.** Simula la misma operación en cada día pasado del activo y cuenta qué pasó en las situaciones parecidas a la de hoy (misma fuerza de tendencia y RSI similar). Con pocos casos, la estimación se acerca al promedio del activo.
+2. **Modelo estadístico.** Una regresión logística entrenada con la historia de **todos** los activos vigilados, lo que le da miles de ejemplos. Usa 10 variables medidas contra la volatilidad de cada activo:
+   - momentum de 1, 3, 6 y 12 meses;
+   - distancia al máximo de 52 semanas;
+   - régimen de volatilidad;
+   - estado del mercado general, y otras.
 
-Con pocos casos, la estimación se acerca al promedio general del activo para no creerle a una racha de suerte. Además, el cálculo solo usa operaciones que ya habían terminado en esa fecha, así que nunca mira el futuro.
+   Se eligió un modelo simple y regularizado a propósito: con datos de mercado, los modelos complejos memorizan el pasado y fallan en vivo.
+3. **Si los dos modelos no coinciden** (difieren más de 15 puntos), no hay confianza y no entra.
+4. **Calibración.** El promedio de los dos modelos se corrige con su historial de aciertos *fuera de muestra*. Si cuando decía "60 %" en realidad ganaba el 50 %, ahora dice 50 %. Si los modelos no saben nada, la probabilidad se queda en el promedio y el agente no se engaña creyendo tener ventaja.
 
-## Probarlo en tu computadora (cuenta de papel, 5 minutos)
+**Regla de oro: nunca mira el futuro.** En cada fecha solo usa operaciones que ya habían terminado, y el modelo se reentrena "hacia adelante".
+
+El backtest muestra la **calidad de las predicciones** con el puntaje de Brier contra la tasa base. Positivo significa que predice mejor que suponer siempre el promedio; en mercados, +1 % a +5 % ya es ventaja real. También muestra una tabla de **calibración** con lo que predijo y lo que pasó.
+
+### Cómo leer `p=38% E=+0.26R n=165`
+
+| Número | Qué significa |
+|---|---|
+| **n=165** | Hubo 165 situaciones parecidas en la historia del activo. |
+| **p=38%** | Probabilidad calibrada de que la operación termine en ganancia, ya con costos. |
+| **E=+0.26R** | Ganancia esperada: si arriesgas 100 USD por operación, son +26 USD en promedio por operación, *si el futuro se parece al pasado*. Sale de `p × (lo que gana cuando gana) − (1 − p) × (lo que pierde cuando pierde)`. |
+
+Con stop móvil es normal ganar el 35–45 % de las veces y aun así tener ventaja: cuando gana, gana 2–3 veces lo arriesgado.
+
+## Probarlo en tu computadora (cuenta de papel)
 
 ```bash
 cd trader
@@ -49,12 +68,11 @@ pip install -e ".[dev]"            # o ".[ia]" si solo quieres usarlo con Claude
 cp config/estrategia.example.toml config/estrategia.toml   # ajusta activos y riesgo
 cp .env.example .env                                         # llaves (opcionales para papel)
 
-python -m bot_trader analizar      # qué ve y qué haría con cada activo (no opera)
-python -m bot_trader backtest      # cómo le habría ido con datos históricos
-python -m bot_trader ciclo         # sugiere operaciones (modo "sugerir")
-python -m bot_trader aprobar 3     # ejecuta la sugerencia #3 en la cuenta de papel
-python -m bot_trader estado        # capital, posiciones y frenos
-python -m bot_trader diario        # bitácora
+python -m bot_trader backtest --robustez   # ¿es sostenible? ¿se rompe si cambian los parámetros?
+python -m bot_trader analizar              # qué ve hoy en cada activo y por qué (no opera)
+python -m bot_trader ciclo                 # decide ahora (en papel)
+python -m bot_trader estado                # capital, posiciones, stops móviles y frenos
+python -m bot_trader diario                # bitácora de señales, órdenes y cierres
 ```
 
 - **Sin llaves de eToro:** los precios salen de Yahoo Finance y las órdenes se simulan en la cuenta de papel.
@@ -62,39 +80,50 @@ python -m bot_trader diario        # bitácora
 
 Pruebas automáticas: `python -m pytest`.
 
+### Qué mirar en el backtest
+
+- **Calmar** (rendimiento anual ÷ peor caída) y **Sharpe**, comparados con comprar y mantener. Es la medida de sostenibilidad.
+- **Meses positivos**, **años positivos** y el **mayor tiempo bajo el máximo**. Un sistema sostenible no pasa años sin recuperarse.
+- **Calidad de las predicciones:** mejora sobre la tasa base y tabla de calibración.
+- **`--robustez`:** repite todo con stops, umbrales, medias y costos distintos. Si la mayoría de variantes pierde, la estrategia está sobreajustada al pasado: no la uses.
+
 ## Pasar a la cuenta DEMO de eToro (dinero virtual)
 
 1. En eToro entra a **Configuración → API** (o a api-portal.etoro.com) y crea una llave:
    - entorno **Virtual/Demo**;
    - permisos de **lectura y escritura**.
 
-   Copia la *API key* y la *user key* al `.env`:
-   ```
-   ETORO_API_KEY=...
-   ETORO_USER_KEY=...
-   ```
+   Copia la *API key* y la *user key* al `.env`.
 2. Verifica la conexión. Este comando solo lee: revisa las llaves, que cada símbolo exista en eToro y la cartera.
    ```bash
    python -m bot_trader verificar-etoro
-   python -m bot_trader buscar BTC          # si un símbolo no aparece, busca cómo se llama en eToro
+   python -m bot_trader buscar GLD          # si un símbolo no aparece, busca cómo se llama en eToro
    ```
-   Si el símbolo en eToro es distinto al tuyo, usa `simbolo_etoro = "..."` en ese `[[activos]]`.
-3. En `config/estrategia.toml` pon `cuenta = "demo"`. Deja `modo = "sugerir"` unos días y aprueba a mano lo que te convenza.
-4. Cuando confíes en lo que propone, pon `modo = "autonomo"`. El bot abre y cierra solo en la demo.
+   Si el símbolo es distinto, usa `simbolo_etoro = "..."` en ese `[[activos]]`.
+3. En `config/estrategia.toml` pon `cuenta = "demo"` y deja al agente operar varias semanas. Compara con lo que prometía el backtest.
 
-El bot **solo administra las posiciones que él abrió**. No toca lo que abras a mano ni tus copias de otros traders. Con `capital_maximo_bot` puedes limitar cuánto del capital usa.
+El agente **solo administra las posiciones que él abrió**. No toca lo que abras a mano ni tus copias de otros traders. Con `capital_maximo_bot` puedes limitar cuánto del capital usa.
 
-## Dejarlo corriendo
+## Dejar el agente corriendo 24/7
 
 ```bash
-python -m bot_trader correr --cada-minutos 60
+python -m bot_trader correr --cada-minutos 30
 ```
 
-Corre un ciclo cada hora. Con velas diarias no hace falta más seguido: el stop y el objetivo ya están puestos en eToro. También puedes usar cron:
+- **Cada 30 minutos vigila:** detecta stops ejecutados por eToro, revisa los frenos y avisa si pasó algo.
+- **Una vez al día** (desde `hora_decision_utc`, por defecto 21:00 UTC, después del cierre de Wall Street) **decide**: cierra lo que rompió la tendencia, abre lo que tiene ventaja y manda un resumen.
+- Los stops móviles quedan puestos **en eToro**, que los va moviendo aunque el agente esté apagado.
 
-```
-# lunes a viernes, cada hora de 9 a 16 (hora del servidor)
-0 9-16 * * 1-5  cd /ruta/trader && .venv/bin/python -m bot_trader ciclo >> bot.log 2>&1
+En un servidor (el mismo de US$5 del bot de citas alcanza), como servicio que se reinicia solo:
+
+```bash
+sudo useradd -r -m -d /opt/trader trader
+sudo cp -r . /opt/trader && sudo chown -R trader: /opt/trader
+sudo -u trader bash -c 'cd /opt/trader && python3 -m venv .venv && .venv/bin/pip install -e ".[ia]"'
+sudo cp deploy/bot-trader.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now bot-trader
+journalctl -u bot-trader -f                         # ver qué hace
+sudo crontab -u trader deploy/respaldo.cron         # respaldo diario (requiere: sudo apt install sqlite3)
 ```
 
 **Avisos por Telegram:**
@@ -102,49 +131,61 @@ Corre un ciclo cada hora. Con velas diarias no hace falta más seguido: el stop 
 1. Crea un bot con @BotFather.
 2. Pon `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` en el `.env`.
 
-Te avisa cuando sugiere, ejecuta, cierra o se activa un freno.
+Recibes un resumen después de cada decisión diaria, más un aviso inmediato si se ejecuta un stop, si falla algo o si el agente se pausa.
 
-**Botones de pánico:**
+**Pausas automáticas** (se reanudan solo a mano, después de revisar):
 
-- `python -m bot_trader pausar`: no abre nada nuevo.
-- `python -m bot_trader cerrar-todo --si`: cierra todas las posiciones del bot y lo pausa.
-- `python -m bot_trader reanudar`: vuelve a operar.
+- **Drawdown:** la cuenta cayó más de 15 % desde su máximo.
+- **Desgaste del modelo:** en sus últimas operaciones ganó muchas menos veces de las que sus probabilidades prometían. La diferencia tiene que ser estadísticamente fuerte (z < −2, con al menos 15 operaciones). Señal de que el mercado cambió.
+
+**Comandos de control:**
+
+| Comando | Qué hace |
+|---|---|
+| `python -m bot_trader pausar` | Deja de abrir posiciones nuevas. |
+| `python -m bot_trader cerrar-todo --si` | Cierra todas las posiciones del bot y lo pausa. |
+| `python -m bot_trader reanudar` | Vuelve a operar. |
+
+Si prefieres aprobar cada operación, usa `modo = "sugerir"` y `python -m bot_trader aprobar <número>`. Antes de ejecutar, el agente vuelve a validar la señal con datos frescos.
 
 ## Pasar a dinero REAL (solo después de semanas en demo)
 
 Lista de control:
 
-- [ ] El backtest de tus activos tiene ventaja (no solo "gana": que gane con caídas aceptables).
-- [ ] Corrió al menos 4–8 semanas en demo y los resultados se parecen al backtest.
+- [ ] `backtest --robustez` sale robusto o aceptable, con Calmar/Sharpe mejor que comprar y mantener.
+- [ ] La calidad de las predicciones es positiva y la tabla de calibración es razonable.
+- [ ] Corrió 4–8 semanas en demo sin pausas por desgaste y con resultados parecidos al backtest.
 - [ ] Entiendes por qué hizo cada operación (`diario`).
 
 Para activarlo:
 
-1. Crea una llave nueva con entorno **Real** y ponla en el `.env`.
-2. Agrega `ETORO_CONFIRMO_DINERO_REAL=si` al `.env`. Sin esto el bot se niega a usar la cuenta real.
-3. Pon `cuenta = "real"` y empieza con `modo = "sugerir"`.
-4. Revisa el tope por orden `monto_maximo_real` (250 USD por defecto) y considera `capital_maximo_bot`.
+1. Crea una llave con entorno **Real**.
+2. Agrega `ETORO_CONFIRMO_DINERO_REAL=si` al `.env`. Sin esto el agente se niega a usar la cuenta real.
+3. Pon `cuenta = "real"`.
+4. Empieza con `capital_maximo_bot` chico. El tope por orden es `monto_maximo_real` (250 USD por defecto).
 
 Antes de empezar, toma en cuenta:
 
-- **Costos de eToro.** Revisa la tabla de comisiones de eToro para tu país y ajusta `costo_por_lado`. Ese valor es lo que el bot descuenta en cada entrada y salida, en backtest y en papel. La cripto suele costar bastante más que las acciones (~1 % por lado). Las ventas en corto y el apalancamiento son CFDs con costo nocturno.
+- **Costos de eToro.** Revisa la tabla de comisiones de eToro para tu país y ajusta `costo_por_lado`. Ese valor es lo que el agente descuenta en cada entrada y salida, en backtest y en papel. La cripto suele costar bastante más que las acciones (~1 % por lado). Las ventas en corto y el apalancamiento son CFDs con costo nocturno: por eso están apagados.
 - **Impuestos.** Las ganancias pueden causar impuestos en tu país; la bitácora te sirve de registro.
 
-## Costos de operar el bot
+## Costos de operar el agente
 
 | Pieza | Costo |
 |---|---|
 | Precios de eToro o Yahoo, noticias RSS | gratis |
-| Noticias con Claude | una llamada para todos los activos, reusada durante `refrescar_horas` (4 h), con esfuerzo bajo. Son unas pocas llamadas al día: del orden de unos dólares al mes con 6 activos. El modelo se cambia en `[noticias] modelo` |
-| Servidor | el mismo de US$5 que el bot de citas alcanza (o tu computadora) |
+| Noticias con Claude | una llamada para todos los activos, reusada durante `refrescar_horas` (4 h), con esfuerzo bajo. Del orden de unos dólares al mes. El modelo se cambia en `[noticias] modelo` |
+| Servidor | US$5/mes o tu computadora |
 
 ## Limitaciones (para no engañarse)
 
-- **Las rutas de eToro no se probaron en vivo.** Se tomaron de la documentación pública de eToro y de un cliente de código abierto que las verificó contra la API real. Las pruebas automáticas usan un servidor falso. Corre `verificar-etoro` y prueba en demo antes que nada. Si eToro cambia una ruta, todas están juntas en `bot_trader/etoro.py` (`PATHS`).
-- **Historia limitada:** eToro entrega como máximo 1000 velas (~4 años en diario). Yahoo da 5 años.
-- **El backtest no incluye noticias**, porque no hay titulares históricos confiables: mide solo la parte técnica.
-- **Yahoo Finance no es una API oficial**, así que puede fallar o cambiar. Para backtests reproducibles, usa `fuente_precios = "csv"`.
-- **El modelo de probabilidad es simple a propósito** (tendencia × RSI). Más complejo suele significar sobreajustado. No optimices parámetros hasta que el backtest se vea perfecto: eso casi siempre falla en vivo.
+- **Las rutas de eToro no se probaron en vivo.** Se tomaron de la documentación pública de eToro y de un cliente de código abierto que las verificó contra la API real; eso incluye el stop móvil (`stopLossType: "trailing"`). Las pruebas automáticas usan un servidor falso. Corre `verificar-etoro` y prueba en demo antes que nada. Si eToro cambia algo, todas las rutas están en `bot_trader/etoro.py`.
+- **El desarrollo se validó con datos sintéticos.** No había acceso a datos reales de mercado desde el entorno de desarrollo. La evaluación que cuenta es la que corras tú con `backtest --robustez` sobre datos reales.
+- **Historia limitada:** eToro entrega como máximo 1000 velas (~4 años en diario); Yahoo da 5 años. Más historia hace las estadísticas más confiables.
+- **El backtest no incluye noticias:** no hay titulares históricos confiables.
+- **El stop móvil en el backtest es una aproximación.** Se mueve con el máximo de cada vela diaria; eToro lo mueve en tiempo real, así que en vivo puede salir un poco antes o después.
+- **Yahoo Finance no es una API oficial.** Para backtests reproducibles usa `fuente_precios = "csv"`.
+- **No optimices parámetros hasta que el backtest se vea perfecto.** Eso casi siempre falla en vivo. `--robustez` existe para detectarlo.
 
 ## Estructura
 
@@ -152,17 +193,21 @@ Antes de empezar, toma en cuenta:
 bot_trader/
   analysis/indicators.py   medias, RSI, ATR, MACD, volatilidad (sin mirar el futuro)
   analysis/trend.py        puntaje de tendencia de -1 a +1
-  analysis/probability.py  probabilidad y ganancia esperada de casos parecidos
+  analysis/features.py     10 variables medidas contra la volatilidad para el modelo
+  analysis/probability.py  simulación de operaciones con stop móvil y "casos parecidos"
+  analysis/model.py        regresión logística regularizada (entrenamiento hacia adelante)
+  analysis/analyst.py      combina modelos, calibra, régimen de mercado y correlaciones
   analysis/sentiment.py    noticias con Claude (salida JSON estructurada) o palabras clave
   strategy.py              decide COMPRAR / CERRAR / MANTENER / ESPERAR y explica por qué
-  risk.py                  tamaño de posición y frenos de la cuenta
-  brokers.py               cuenta de papel y eToro (demo/real)
+  risk.py                  tamaño con volatilidad, correlación, Kelly, drawdown y régimen; frenos
+  brokers.py               cuenta de papel y eToro (demo/real), con stop móvil
   etoro.py                 cliente de la API pública de eToro
   sources.py               precios (eToro, Yahoo, CSV) y noticias (RSS)
-  engine.py                el ciclo completo, aprobar sugerencias, cerrar todo
-  backtest.py              misma estrategia y riesgo sobre datos históricos
+  engine.py                el agente: vigilar, decidir una vez al día, desgaste del modelo
+  backtest.py              backtest con métricas de sostenibilidad, calidad de predicción y robustez
   db.py                    bitácora SQLite
   cli.py                   comandos
-config/estrategia.example.toml
+config/estrategia.example.toml   perfil sostenible con una lista diversificada
+deploy/                          servicio systemd y respaldo diario
 tests/
 ```

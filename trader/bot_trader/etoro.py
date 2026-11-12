@@ -240,8 +240,13 @@ class EtoroClient:
         stop_loss: float | None = None,
         take_profit: float | None = None,
         request_id: str | None = None,
+        trailing: bool = False,
     ) -> dict:
-        """Abre una posición a mercado por monto en USD. Devuelve {token, orderId, referenceId}."""
+        """Abre una posición a mercado por monto en USD. Devuelve {token, orderId, referenceId}.
+
+        Con `trailing=True` el stop es móvil: eToro lo va subiendo (o bajando en cortos) detrás del
+        precio a la misma distancia con la que se abrió, aunque el bot esté apagado.
+        """
         if amount <= 0:
             raise ValueError("el monto debe ser positivo")
         # Comprar sin apalancamiento = acción/cripto real; corto o apalancado = CFD.
@@ -258,6 +263,7 @@ class EtoroClient:
         }
         if stop_loss is not None:
             body["stopLossRate"] = float(stop_loss)
+            body["stopLossType"] = "trailing" if trailing else "fixed"
         if take_profit is not None:
             body["takeProfitRate"] = float(take_profit)
         request_id = request_id or str(uuid.uuid4())

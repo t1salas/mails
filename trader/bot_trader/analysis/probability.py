@@ -1,17 +1,21 @@
 """Probabilidades empíricas: "¿qué pasó las otras veces que el activo estuvo así?"
 
-Para cada vela pasada se simula la misma operación que haría el bot (entrar al cierre con un
-stop a `stop_atr` ATR y un objetivo a `objetivo_atr` ATR, salir a más tardar en `horizonte`
-velas) y se anota el resultado en múltiplos de R (1R = lo arriesgado hasta el stop), ya con
-costos. Luego, para la situación actual (tendencia + RSI), se cuentan los casos parecidos.
+Para cada vela pasada se simula la MISMA operación que haría el bot y se anota el resultado en
+múltiplos de R (1R = lo arriesgado hasta el stop), ya con costos. Hay dos estilos de salida:
+
+- `seguimiento` (por defecto, el sostenible): stop inicial a `stop_atr` ATR que sube detrás del
+  precio a distancia fija (stop móvil). Corta rápido lo que sale mal y deja correr lo que sale
+  bien. Gana menos veces, pero las ganancias grandes pagan muchas pérdidas chicas.
+- `objetivo`: stop y objetivo fijos.
 
 Reglas para no engañarse:
 
-- Sin mirar el futuro: en la vela `t` solo cuentan operaciones que ya terminaron (`i + horizonte <= t`).
-- Si el stop y el objetivo caen en la misma vela, se asume que primero saltó el stop.
+- Sin mirar el futuro: en la vela `t` solo cuentan operaciones que ya se habían cerrado en `t`.
+  (Las que siguen abiertas, que suelen ser las ganadoras largas, no cuentan: sesgo conservador.)
+- Dentro de una vela se revisa primero el stop y después se mueve el stop con el máximo.
 - Si el precio abre con hueco más allá del stop, se sale al precio de apertura (peor que el stop).
-- Con pocos casos parecidos, la estimación se "encoge" hacia el promedio general del activo
-  (contracción bayesiana), para no creerle a 5 casos con suerte.
+- Con pocos casos parecidos, la estimación se "encoge" hacia el promedio del activo
+  (contracción bayesiana), para no creerle a cinco casos con suerte.
 """
 
 from __future__ import annotations
@@ -55,56 +59,73 @@ def state_at(feats: Features, i: int) -> tuple[int, int] | None:
     return score_bucket(s), rsi_bucket(r)
 
 
-def trade_levels(price: float, atr: float, is_buy: bool, params: StrategyParams) -> tuple[float, float]:
-    """(stop, objetivo) absolutos para una entrada a `price`."""
-    if is_buy:
-        return price - params.stop_atr * atr, price + params.target_atr * atr
-    return price + params.stop_atr * atr, price - params.target_atr * atr
+def trade_levels(
+    price: float, atr: float, is_buy: bool, params: StrategyParams
+) -> tuple[float, float | None]:
+    """(stop, objetivo) absolutos para una entrada a `price`. Con stop móvil no hay objetivo."""
+    dist = params.stop_atr * atr
+    stop = price - dist if is_buy else price + dist
+    if params.exit_style == "seguimiento":
+        return stop, None
+    t = params.target_atr * atr
+    return stop, (price + t if is_buy else price - t)
 
 
-def trade_outcome_r(
+@dataclass(frozen=True)
+class Outcome:
+    r: float  # resultado en R, con costos
+    resolved: int  # índice de la vela en que terminó la operación
+
+
+def simulate_trade(
     feats: Features, i: int, is_buy: bool, params: StrategyParams, cost_per_side: float
-) -> float | None:
-    """Resultado en R de entrar en la vela `i`. None si no hay datos para resolverla."""
+) -> Outcome | None:
+    """Simula entrar al cierre de la vela `i`. None si todavía no terminó o faltan datos."""
     a = feats.atr[i]
     n = len(feats)
-    if a is None or a <= 0 or i + params.horizon >= n:
+    if a is None or a <= 0 or i + 1 >= n:
         return None
     entry = feats.close[i]
-    risk = params.stop_atr * a
+    dist = params.stop_atr * a
     stop, target = trade_levels(entry, a, is_buy, params)
-    exit_price = feats.close[i + params.horizon]
-    for j in range(i + 1, i + params.horizon + 1):
+    trailing = params.exit_style == "seguimiento"
+    last = i + params.horizon
+    exit_price = None
+    exit_index = None
+    for j in range(i + 1, min(last, n - 1) + 1):
         o, h, low = feats.open[j], feats.high[j], feats.low[j]
         if is_buy:
             if o <= stop:
                 exit_price = o
-                break
-            if low <= stop:
+            elif low <= stop:
                 exit_price = stop
-                break
-            if o >= target:
+            elif target is not None and o >= target:
                 exit_price = o
-                break
-            if h >= target:
+            elif target is not None and h >= target:
                 exit_price = target
-                break
+            elif trailing:
+                stop = max(stop, h - dist)
         else:
             if o >= stop:
                 exit_price = o
-                break
-            if h >= stop:
+            elif h >= stop:
                 exit_price = stop
-                break
-            if o <= target:
+            elif target is not None and o <= target:
                 exit_price = o
-                break
-            if low <= target:
+            elif target is not None and low <= target:
                 exit_price = target
-                break
+            elif trailing:
+                stop = min(stop, low + dist)
+        if exit_price is not None:
+            exit_index = j
+            break
+    if exit_price is None:
+        if last > n - 1:
+            return None  # sigue abierta: todavía no se sabe cómo termina
+        exit_price, exit_index = feats.close[last], last
     pnl = (exit_price - entry) if is_buy else (entry - exit_price)
     costs = 2 * cost_per_side * entry
-    return (pnl - costs) / risk
+    return Outcome((pnl - costs) / dist, exit_index)
 
 
 def wilson_lower(wins: float, n: int, z: float = 1.96) -> float:
@@ -118,70 +139,82 @@ def wilson_lower(wins: float, n: int, z: float = 1.96) -> float:
 
 
 @dataclass
+class _Stats:
+    n: int = 0
+    wins: int = 0
+    sum_r: float = 0.0
+    win_r: float = 0.0
+    loss_r: float = 0.0
+
+
 class _Bucket:
-    idx: list[int]
-    cum_wins: list[int]
-    cum_r: list[float]
+    """Resultados ordenados por la vela en que se resolvieron, con sumas acumuladas."""
 
-    def upto(self, cutoff: int) -> tuple[int, int, float]:
-        k = bisect_right(self.idx, cutoff)
-        if k == 0:
-            return 0, 0, 0.0
-        return k, self.cum_wins[k - 1], self.cum_r[k - 1]
+    def __init__(self, points: list[tuple[int, float]]):
+        points = sorted(points)
+        self.resolved = [p[0] for p in points]
+        self.cum: list[_Stats] = []
+        acc = _Stats()
+        for _, r in points:
+            acc = _Stats(
+                acc.n + 1,
+                acc.wins + (1 if r > 0 else 0),
+                acc.sum_r + r,
+                acc.win_r + (r if r > 0 else 0.0),
+                acc.loss_r + (-r if r <= 0 else 0.0),
+            )
+            self.cum.append(acc)
 
-
-def _bucket(points: list[tuple[int, float]]) -> _Bucket:
-    idx, wins, rs = [], [], []
-    w, r = 0, 0.0
-    for i, outcome in points:
-        w += 1 if outcome > 0 else 0
-        r += outcome
-        idx.append(i)
-        wins.append(w)
-        rs.append(r)
-    return _Bucket(idx, wins, rs)
+    def upto(self, t: int) -> _Stats:
+        k = bisect_right(self.resolved, t)
+        return self.cum[k - 1] if k else _Stats()
 
 
 class ProbabilityModel:
-    """Modelo de probabilidad para un lado (compra o venta en corto) de un activo."""
+    """Modelo de "casos parecidos" para un lado (compra o venta en corto) de un activo."""
 
     def __init__(self, feats: Features, params: StrategyParams, cost_per_side: float, is_buy: bool = True):
         self.feats = feats
         self.params = params
         self.is_buy = is_buy
         self.states = [state_at(feats, i) for i in range(len(feats))]
+        self.outcomes: list[Outcome | None] = [
+            simulate_trade(feats, i, is_buy, params, cost_per_side) if self.states[i] is not None else None
+            for i in range(len(feats))
+        ]
         by_state: dict[tuple[int, int], list[tuple[int, float]]] = {}
         everything: list[tuple[int, float]] = []
-        for i, state in enumerate(self.states):
-            if state is None:
+        for i, (state, out) in enumerate(zip(self.states, self.outcomes)):
+            if state is None or out is None:
                 continue
-            outcome = trade_outcome_r(feats, i, is_buy, params, cost_per_side)
-            if outcome is None:
-                continue
-            by_state.setdefault(state, []).append((i, outcome))
-            everything.append((i, outcome))
-        self._by_state = {s: _bucket(points) for s, points in by_state.items()}
-        self._all = _bucket(everything)
+            by_state.setdefault(state, []).append((out.resolved, out.r))
+            everything.append((out.resolved, out.r))
+        self._by_state = {s: _Bucket(points) for s, points in by_state.items()}
+        self._all = _Bucket(everything)
 
     def at(self, t: int) -> Probability | None:
-        """Estimación para una entrada en la vela `t`, usando solo operaciones ya cerradas."""
+        """Estimación para una entrada en la vela `t`, usando solo operaciones ya cerradas en `t`."""
         state = self.states[t] if 0 <= t < len(self.states) else None
         if state is None:
             return None
-        cutoff = t - self.params.horizon
-        n_all, wins_all, r_all = self._all.upto(cutoff)
-        if n_all < MIN_BASE_SAMPLES:
+        base = self._all.upto(t)
+        if base.n < MIN_BASE_SAMPLES:
             return None
-        base_p, base_r = wins_all / n_all, r_all / n_all
+        base_p, base_r = base.wins / base.n, base.sum_r / base.n
         bucket = self._by_state.get(state)
-        n, wins, r_sum = bucket.upto(cutoff) if bucket else (0, 0, 0.0)
-        p = (wins + PRIOR_STRENGTH * base_p) / (n + PRIOR_STRENGTH)
-        exp_r = (r_sum + PRIOR_STRENGTH * base_r) / (n + PRIOR_STRENGTH)
+        s = bucket.upto(t) if bucket else _Stats()
+        p = (s.wins + PRIOR_STRENGTH * base_p) / (s.n + PRIOR_STRENGTH)
+        losses = base.n - base.wins
+        avg_win = base.win_r / base.wins if base.wins else 0.0
+        avg_loss = base.loss_r / losses if losses else 1.0
         return Probability(
             p_win=p,
-            expectancy_r=exp_r,
-            n=n,
+            expectancy_r=p * avg_win - (1 - p) * avg_loss,
+            n=s.n,
             base_p_win=base_p,
             base_expectancy_r=base_r,
-            p_low=wilson_lower(wins, n),
+            p_low=wilson_lower(s.wins, s.n),
+            p_hist=p,
+            avg_win_r=avg_win,
+            avg_loss_r=avg_loss,
         )

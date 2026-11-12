@@ -95,8 +95,11 @@ def test_open_order_body_demo_vs_real(fake):
     assert body == {
         "action": "open", "transaction": "buy", "instrumentId": 1001, "orderType": "mkt",
         "settlementType": "real", "leverage": 1, "amount": 200.46, "orderCurrency": "usd",
-        "stopLossRate": 140.0, "takeProfitRate": 180.0,
+        "stopLossRate": 140.0, "stopLossType": "fixed", "takeProfitRate": 180.0,
     }
+    c.open_market_order(1001, True, 100, 1, stop_loss=140.0, trailing=True)
+    body = json.loads(fake.requests[-1].content)
+    assert body["stopLossType"] == "trailing" and "takeProfitRate" not in body
     assert req.headers["x-request-id"] == "ref-1"
     real = client(fake, demo=False)
     real.open_market_order(1001, False, 100, 2)

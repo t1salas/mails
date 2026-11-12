@@ -1,9 +1,16 @@
-"""El ciclo del bot: datos -> análisis -> riesgo -> sugerir o ejecutar -> bitácora.
+"""El agente: datos -> análisis -> riesgo -> sugerir o ejecutar -> bitácora.
 
-Orden de cada ciclo (como lo haría un trader disciplinado):
-  1. Revisar salidas primero (stops, objetivos, tesis rotas). Proteger capital va antes que ganar.
-  2. Revisar los frenos de la cuenta (pérdida diaria, drawdown, pausa manual).
-  3. Buscar entradas, ordenadas por ganancia esperada, y dimensionarlas por riesgo.
+Funciona solo, como un gestor de capital disciplinado:
+  - VIGILA en cada ciclo (p. ej. cada 30 min): stops, cierres hechos por eToro y frenos de riesgo.
+  - DECIDE una vez al día, después del cierre del mercado (`hora_decision_utc`), con las velas del
+    día ya cerradas, igual que en el backtest. Operar menos seguido = menos costos y menos ruido.
+
+Orden de cada decisión:
+  1. Revisar salidas primero (stops, tesis rotas). Proteger capital va antes que ganar.
+  2. Revisar los frenos de la cuenta (pérdida diaria, drawdown, pausa manual) y si el modelo sigue
+     acertando lo que promete (si no, se pausa solo: "desgaste del modelo").
+  3. Buscar entradas, ordenadas por ganancia esperada, y dimensionarlas con el perfil sostenible
+     (volatilidad objetivo, correlaciones, Kelly fraccional, drawdown y régimen de mercado).
   4. En modo "sugerir" solo se anotan y avisan; en modo "autonomo" se ejecutan.
 """
 
@@ -12,20 +19,19 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
+import math
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 
-from bot_trader.analysis.probability import ProbabilityModel
+from bot_trader.analysis.analyst import Analyst
 from bot_trader.analysis.sentiment import ClaudeNewsAnalyzer, lexicon_view
-from bot_trader.analysis.trend import Features, compute_features
 from bot_trader.brokers import Broker, EtoroBroker, Exit, PaperBroker
 from bot_trader.config import Asset, Settings
 from bot_trader.db import Journal, from_iso, iso, now_utc
 from bot_trader.etoro import EtoroClient
-from bot_trader.models import Account, Candle, Headline, NewsView, Position, Signal
-from bot_trader.risk import Guard, RiskState, check_guards, position_size
+from bot_trader.models import Account, Candle, Headline, NewsView, Position, Regime, Signal
+from bot_trader.risk import Guard, RiskState, TradeContext, check_guards, size_trade
 from bot_trader.sources import NewsSource, PriceSource, make_price_source
-from bot_trader.strategy import evaluate
 
 log = logging.getLogger(__name__)
 
@@ -34,8 +40,6 @@ log = logging.getLogger(__name__)
 class Analysis:
     asset: Asset
     signal: Signal | None = None
-    candles: list[Candle] = field(default_factory=list)
-    feats: Features | None = None
     error: str | None = None
 
 
@@ -65,14 +69,17 @@ class CycleResult:
     exits: list[Exit] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     newly_paused: bool = False
+    decision_round: bool = False
+    regime: Regime | None = None
+    model_info: str = ""
 
     @property
     def noteworthy(self) -> bool:
-        """¿Vale la pena avisar? Solo si hay algo nuevo (evita repetir el mismo aviso cada hora)."""
+        """¿Vale la pena avisar? Una vez al día (la decisión) o si pasó algo nuevo."""
         fresh = any(
             a.kind in ("ejecutada", "pendiente", "fallida") or (a.kind == "sugerida" and a.new) for a in self.actions
         )
-        return bool(self.exits or fresh or self.newly_paused)
+        return bool(self.exits or fresh or self.newly_paused or self.decision_round)
 
 
 class Bot:
@@ -174,9 +181,29 @@ class Bot:
             payload["views"][symbol] = d
         self.journal.set("noticias_cache", json.dumps(payload, ensure_ascii=False))
 
+    def fetch_market(self) -> tuple[dict[str, list[Candle]], dict[str, str], list[Candle] | None]:
+        """Velas de la lista de activos y del activo de referencia del mercado."""
+        candles, errors = self.fetch_candles(self.s.assets)
+        ref = self.s.reference_asset
+        reference = None
+        if ref is not None:
+            if ref.symbol in candles:
+                reference = candles[ref.symbol]
+            else:
+                extra, _ = self.fetch_candles([ref])
+                reference = extra.get(ref.symbol)
+        return candles, errors, reference
+
+    def build_analyst(self, candles: dict[str, list[Candle]], reference: list[Candle] | None) -> Analyst:
+        analyst = Analyst(candles, self.s, reference)
+        last = max((bars[-1].date.date() for bars in candles.values() if bars), default=None)
+        if last is not None:
+            analyst.train(last)
+        return analyst
+
     def analyze(
         self,
-        candles: dict[str, list[Candle]],
+        analyst: Analyst,
         errors: dict[str, str],
         positions: list[Position],
         news: dict[str, NewsView] | None = None,
@@ -184,24 +211,66 @@ class Bot:
         by_symbol = {p.symbol: p for p in positions}
         out = []
         for asset in self.s.assets:
-            if asset.symbol in errors or asset.symbol not in candles:
+            if asset.symbol in errors or asset.symbol not in analyst.feats:
                 out.append(Analysis(asset, error=errors.get(asset.symbol, "sin datos")))
                 continue
-            bars = candles[asset.symbol]
-            feats = compute_features(bars, self.s.strategy)
-            t = len(bars) - 1
-            prob_long = ProbabilityModel(feats, self.s.strategy, self.s.cost_per_side, True).at(t)
-            prob_short = (
-                ProbabilityModel(feats, self.s.strategy, self.s.cost_per_side, False).at(t)
-                if self.s.risk.allow_short
-                else None
-            )
-            signal = evaluate(
-                asset.symbol, feats, t, prob_long, prob_short, (news or {}).get(asset.symbol),
-                by_symbol.get(asset.symbol), self.s.strategy, self.s.risk,
-            )
-            out.append(Analysis(asset, signal=signal, candles=bars, feats=feats))
+            t = len(analyst.feats[asset.symbol]) - 1
+            signal = analyst.evaluate(asset.symbol, t, by_symbol.get(asset.symbol), (news or {}).get(asset.symbol))
+            out.append(Analysis(asset, signal=signal))
         return out
+
+    def trade_context(self, analyst: Analyst, symbol: str, positions: list[Position], equity: float, peak: float) -> TradeContext:
+        t = len(analyst.feats[symbol]) - 1
+        d = analyst.dates[symbol][t]
+        correlations = {}
+        for p in positions:
+            if p.symbol != symbol:
+                c = analyst.correlation(symbol, p.symbol, d)
+                if c is not None:
+                    correlations[p.symbol] = c
+        return TradeContext(
+            drawdown=max(0.0, 1 - equity / peak) if peak > 0 else 0.0,
+            regime=analyst.regime_for(symbol, d),
+            annual_vol=analyst.annual_vol(symbol, t),
+            correlations=correlations,
+        )
+
+    @staticmethod
+    def model_summary(analyst: Analyst) -> str:
+        model = analyst.models.get(True)
+        if model is None:
+            return "modelo estadístico: todavía sin datos suficientes (se usan solo los casos parecidos)"
+        return f"modelo estadístico entrenado con {model.n:,} operaciones históricas de {len(analyst.feats)} activos"
+
+    # --- autonomía -----------------------------------------------------------------------
+
+    def is_decision_time(self, now: datetime) -> bool:
+        hour = self.s.decision_hour_utc
+        if hour < 0:
+            return True
+        return now.hour >= hour and self.journal.get("ultima_decision") != now.date().isoformat()
+
+    def model_decay(self) -> str | None:
+        """¿Las operaciones reales ganan mucho menos de lo que el modelo prometía?
+
+        Compara ganadoras reales contra las esperadas (suma de probabilidades). Si la diferencia
+        es estadísticamente fuerte (z < -2), el modelo dejó de describir el mercado actual.
+        """
+        rows = self.journal.closed_trades_with_probability(100)
+        if len(rows) < self.s.risk.decay_min_trades:
+            return None
+        expected = sum(r["probabilidad"] for r in rows)
+        actual = sum(1 for r in rows if r["pnl"] > 0)
+        var = sum(r["probabilidad"] * (1 - r["probabilidad"]) for r in rows)
+        if var <= 0:
+            return None
+        z = (actual - expected) / math.sqrt(var)
+        if z < -2:
+            return (
+                f"desgaste del modelo: en las últimas {len(rows)} operaciones ganaron {actual} y se esperaban "
+                f"{expected:.1f} (z = {z:.1f}). El mercado cambió o la estrategia dejó de funcionar: revisar antes de seguir"
+            )
+        return None
 
     # --- capital -------------------------------------------------------------------------
 
@@ -216,14 +285,14 @@ class Bot:
 
     # --- ciclo ---------------------------------------------------------------------------
 
-    def run_cycle(self) -> CycleResult:
+    def run_cycle(self, force_decision: bool = False) -> CycleResult:
         now = self.clock()
         result = CycleResult(account=self.s.account, mode=self.s.mode)
         expired = self.journal.expire_suggestions(now - timedelta(hours=self.s.suggestion_ttl_hours))
         if expired:
             result.notes.append(f"{expired} sugerencia(s) vencieron sin aprobarse")
 
-        candles, errors = self.fetch_candles(self.s.assets)
+        candles, errors, reference = self.fetch_market()
         prices = {sym: bars[-1].close for sym, bars in candles.items()}
 
         # 1. Salidas automáticas (en papel; en eToro las ejecuta el broker y se detectan abajo)
@@ -242,9 +311,29 @@ class Bot:
             result.newly_paused = True
         result.guard = guard
 
+        decision = force_decision or self.is_decision_time(now)
+        result.decision_round = decision
+        if not decision:
+            hour = self.s.decision_hour_utc
+            when = "hoy" if now.hour < hour else "mañana"
+            result.notes.append(f"Ronda de vigilancia. La próxima decisión es {when} desde las {hour:02d}:00 UTC.")
+            return self._finish(result, account, prices, changed=bool(result.exits))
+
+        if self.s.risk.decay_check and not self.risk.paused:
+            decay = self.model_decay()
+            if decay:
+                self.risk.pause(decay)
+                result.newly_paused = True
+                guard = check_guards(equity, peak, day_start, True, self.s.risk)
+                result.guard = guard
+
         # 3. Análisis
+        analyst = self.build_analyst(candles, reference)
         news = self.read_news([a for a in self.s.assets if a.symbol in candles])
-        result.analyses = self.analyze(candles, errors, positions, news)
+        result.analyses = self.analyze(analyst, errors, positions, news)
+        if analyst.ref is not None:
+            result.regime = analyst.market_regime(analyst.ref_dates[-1])
+        result.model_info = self.model_summary(analyst)
 
         # 4. Cierres por tesis rota
         for a in result.analyses:
@@ -277,10 +366,8 @@ class Bot:
                     Action("bloqueada", sig.symbol, sig.action, "enfriamiento: se cerró hace poco una posición aquí")
                 )
                 continue
-            size = position_size(
-                equity, cash, positions, sig.price, sig.stop, sig.symbol, self.s.risk,
-                real_account=self.broker.real_money,
-            )
+            ctx = self.trade_context(analyst, sig.symbol, positions, equity, peak)
+            size = size_trade(equity, cash, positions, sig, self.s.risk, ctx, real_account=self.broker.real_money)
             if not size.ok:
                 result.actions.append(Action("bloqueada", sig.symbol, sig.action, size.reason))
                 continue
@@ -298,8 +385,11 @@ class Bot:
                              leverage=self.s.risk.leverage)
                 )
 
-        # 6. Foto final
-        changed = result.exits or any(x.kind in ("ejecutada", "pendiente") for x in result.actions)
+        self.journal.set("ultima_decision", now.date().isoformat())
+        changed = bool(result.exits) or any(x.kind in ("ejecutada", "pendiente") for x in result.actions)
+        return self._finish(result, account, prices, changed)
+
+    def _finish(self, result: CycleResult, account: Account, prices: dict[str, float], changed: bool) -> CycleResult:
         final = self.broker.account(prices) if changed else account
         result.equity, result.cash = self.bot_equity(final)
         result.positions = final.positions
@@ -324,7 +414,8 @@ class Bot:
         if signal_id is None:
             signal_id = self.journal.save_signal(sig, amount, "enviada")
         fill = self.broker.open(
-            sig.symbol, iid, sig.is_buy, amount, self.s.risk.leverage, sig.price, sig.stop, sig.target
+            sig.symbol, iid, sig.is_buy, amount, self.s.risk.leverage, sig.price, sig.stop, sig.target,
+            trailing=sig.trailing,
         )
         state = "ejecutada" if fill.ok else "pendiente" if fill.pending else "rechazada"
         self.journal.save_order(
@@ -380,27 +471,35 @@ class Bot:
             pnl = f"{exit_.pnl:+,.2f} USD" if exit_.pnl is not None else "P&L por confirmar"
             return f"Cerrada la posición de {asset.symbol} ({pnl})."
 
+        # Antes de ejecutar, se vuelve a validar la señal con datos frescos.
+        candles, errors, reference = self.fetch_market()
+        if asset.symbol not in candles:
+            return errors.get(asset.symbol, f"sin precios de {asset.symbol}")
+        analyst = self.build_analyst(candles, reference)
+        news = self.read_news([a for a in self.s.assets if a.symbol in candles])
+        t = len(analyst.feats[asset.symbol]) - 1
+        sig = analyst.evaluate(asset.symbol, t, None, news.get(asset.symbol))
         is_buy = bool(row["es_compra"])
         drift = (price / row["precio"] - 1) * (1 if is_buy else -1)
-        stop, target = row["stop"], row["objetivo"]
         if drift > self.s.max_price_drift:
             return (
                 f"El precio de {asset.symbol} ya se movió {drift:+.1%} a favor desde la sugerencia "
                 f"({row['precio']:.2f} -> {price:.2f}); no persigo el precio. Espera otra señal."
             )
-        if (is_buy and (price <= stop or price >= target)) or (not is_buy and (price >= stop or price <= target)):
+        if sig.action != row["accion"]:
             self.journal.set_signal_state(signal_id, "descartada")
-            return f"El precio ({price:.2f}) ya está fuera del rango stop/objetivo; sugerencia descartada."
+            why = "; ".join(sig.reasons[:3])
+            return f"La señal de {asset.symbol} ya no es válida con los datos de ahora ({why}). Sugerencia descartada."
+        account = self.broker.account({s: b[-1].close for s, b in candles.items()})
         equity, cash = self.bot_equity(account)
         peak, day_start = self.risk.update(equity, self.clock().date())
         guard = check_guards(equity, peak, day_start, self.risk.paused, self.s.risk)
         if not guard.can_open:
             return f"No se puede abrir: {guard.reason}"
-        size = position_size(equity, cash, account.positions, price, stop, asset.symbol, self.s.risk,
-                             real_account=self.broker.real_money)
+        ctx = self.trade_context(analyst, asset.symbol, account.positions, equity, peak)
+        size = size_trade(equity, cash, account.positions, sig, self.s.risk, ctx, real_account=self.broker.real_money)
         if not size.ok:
             return f"No se puede abrir: {size.reason}"
-        sig = Signal(symbol=asset.symbol, action=row["accion"], price=price, is_buy=is_buy, stop=stop, target=target)
         action = self._open(sig, size.amount, size.reason, signal_id=signal_id)
         return f"{action.kind.upper()}: {action.action} {asset.symbol} por {size.amount:,.2f} USD. {action.detail}"
 

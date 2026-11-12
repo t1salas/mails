@@ -1,0 +1,18 @@
+# /etc/systemd/system/bot-trader.service
+# El agente: vigila cada 30 min y decide una vez al día (hora_decision_utc). Se reinicia solo si falla.
+[Unit]
+Description=Bot trader (agente autónomo para eToro)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=trader
+WorkingDirectory=/opt/trader
+EnvironmentFile=/opt/trader/.env
+Environment=BOT_CONFIG=/opt/trader/config/estrategia.toml
+ExecStart=/opt/trader/.venv/bin/python -m bot_trader correr --cada-minutos 30
+Restart=always
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target

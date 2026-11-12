@@ -72,6 +72,9 @@ CREATE TABLE IF NOT EXISTS posiciones (
     precio_salida REAL,
     pnl REAL,
     motivo_cierre TEXT,
+    seguimiento INTEGER NOT NULL DEFAULT 0,
+    distancia_stop REAL,
+    stop_inicial REAL,
     PRIMARY KEY (id, cuenta)
 );
 CREATE TABLE IF NOT EXISTS capital (
@@ -112,7 +115,19 @@ class Journal:
         self.conn = sqlite3.connect(self.path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Agrega columnas nuevas a bitácoras creadas con versiones anteriores."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(posiciones)")}
+        for name, ddl in (
+            ("seguimiento", "INTEGER NOT NULL DEFAULT 0"),
+            ("distancia_stop", "REAL"),
+            ("stop_inicial", "REAL"),
+        ):
+            if name not in cols:
+                self.conn.execute(f"ALTER TABLE posiciones ADD COLUMN {name} {ddl}")
 
     def close(self) -> None:
         self.conn.close()
@@ -262,10 +277,12 @@ class Journal:
         with self.tx() as c:
             c.execute(
                 "INSERT INTO posiciones(id, cuenta, simbolo, instrument_id, es_compra, monto, unidades, "
-                "apalancamiento, precio_entrada, stop, objetivo, abierta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "apalancamiento, precio_entrada, stop, objetivo, abierta, seguimiento, distancia_stop, stop_inicial) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     p.id, self.account, p.symbol, p.instrument_id, int(p.is_buy), p.amount, p.units,
-                    p.leverage, p.entry_price, p.stop, p.target, iso(p.opened_at),
+                    p.leverage, p.entry_price, p.stop, p.target, iso(p.opened_at), int(p.trailing),
+                    p.trail_distance, p.stop,
                 ),
             )
 
@@ -283,6 +300,32 @@ class Journal:
             stop=row["stop"],
             target=row["objetivo"],
             opened_at=from_iso(row["abierta"]),
+            trailing=bool(row["seguimiento"]),
+            trail_distance=row["distancia_stop"],
+        )
+
+    def initial_stop(self, position_id: str) -> float | None:
+        row = self.conn.execute(
+            "SELECT stop_inicial, stop FROM posiciones WHERE id=? AND cuenta=?", (position_id, self.account)
+        ).fetchone()
+        if row is None:
+            return None
+        return row["stop_inicial"] if row["stop_inicial"] is not None else row["stop"]
+
+    def update_stop(self, position_id: str, stop: float) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE posiciones SET stop=? WHERE id=? AND cuenta=?", (stop, position_id, self.account))
+
+    def closed_trades_with_probability(self, limit: int = 100) -> list[sqlite3.Row]:
+        """Operaciones cerradas del bot junto con la probabilidad que se estimó al abrirlas."""
+        return list(
+            self.conn.execute(
+                "SELECT p.simbolo, p.pnl, s.probabilidad FROM posiciones p "
+                "JOIN senales s ON s.posicion_id = p.id AND s.cuenta = p.cuenta "
+                "WHERE p.cuenta=? AND p.cerrada IS NOT NULL AND p.pnl IS NOT NULL AND s.probabilidad IS NOT NULL "
+                "ORDER BY p.cerrada DESC LIMIT ?",
+                (self.account, limit),
+            )
         )
 
     def open_positions(self) -> list[Position]:

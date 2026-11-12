@@ -56,8 +56,8 @@ class Asset:
 
 @dataclass
 class RiskParams:
-    risk_per_trade: float = 0.01  # fracción del capital que se pierde si salta el stop
-    max_positions: int = 5
+    risk_per_trade: float = 0.0075  # fracción del capital que se pierde si salta el stop
+    max_positions: int = 6
     max_asset_exposure: float = 0.20
     max_total_exposure: float = 0.80
     max_daily_loss: float = 0.03  # al perder esto en el día, no abre más hasta mañana
@@ -67,10 +67,19 @@ class RiskParams:
     min_order: float = 50.0
     max_order_real: float = 250.0  # tope duro por orden en la cuenta real
     bot_capital: float = 0.0  # 0 = usa todo el capital de la cuenta
-    min_probability: float = 0.45
+    min_probability: float = 0.35  # con stop móvil se gana menos veces pero más; manda la expectativa
     min_expectancy_r: float = 0.10
     min_samples: int = 30
     cooldown_hours: float = 24.0
+    # --- perfil sostenible ---
+    vol_target: float = 0.12  # tope por posición según su volatilidad: lo volátil recibe menos (0 = desactivado)
+    max_correlation: float = 0.85  # no abrir algo casi idéntico a lo que ya se tiene
+    high_correlation: float = 0.70  # con correlación alta, se arriesga la mitad
+    kelly_fraction: float = 0.25  # tope de riesgo = 1/4 del criterio de Kelly (0 = desactivado)
+    drawdown_scaling: bool = True  # arriesgar menos mientras más se cae desde el máximo
+    defensive_mult: float = 0.5  # multiplicador de riesgo con mercado bajista
+    decay_check: bool = True  # pausar si el modelo deja de acertar lo que promete
+    decay_min_trades: int = 15
 
 
 @dataclass
@@ -79,9 +88,11 @@ class StrategyParams:
     slow_sma: int = 200
     rsi_period: int = 14
     atr_period: int = 14
-    stop_atr: float = 2.0
-    target_atr: float = 4.0
-    horizon: int = 20
+    exit_style: str = "seguimiento"  # seguimiento (stop móvil, deja correr ganancias) | objetivo (stop y objetivo fijos)
+    stop_atr: float = 3.0
+    target_atr: float = 6.0  # solo con exit_style = objetivo
+    horizon: int = 120  # velas máximas al simular cada operación histórica
+    max_disagreement: float = 0.15  # si los dos modelos difieren más que esto, no hay confianza
     news_weight: float = 0.25
     entry_score: float = 0.25
     exit_score: float = -0.15
@@ -113,6 +124,8 @@ class Settings:
     db_path: str = "trader.db"
     suggestion_ttl_hours: float = 24.0
     max_price_drift: float = 0.015  # al aprobar una sugerencia, cuánto se pudo mover el precio
+    reference: str = "SPY"  # activo que define el régimen del mercado ("" = sin régimen)
+    decision_hour_utc: int = 21  # decide una vez al día desde esta hora UTC (-1 = en cada ciclo)
     assets: list[Asset] = field(default_factory=list)
     risk: RiskParams = field(default_factory=RiskParams)
     strategy: StrategyParams = field(default_factory=StrategyParams)
@@ -128,6 +141,12 @@ class Settings:
     @property
     def has_etoro_keys(self) -> bool:
         return bool(self.etoro_api_key and self.etoro_user_key)
+
+    @property
+    def reference_asset(self) -> Asset | None:
+        if not self.reference:
+            return None
+        return self.asset(self.reference) or Asset(self.reference)
 
     @property
     def effective_price_source(self) -> str:
@@ -164,6 +183,14 @@ class Settings:
             raise ConfigError("media_rapida debe ser menor que media_lenta")
         if s.stop_atr <= 0 or s.target_atr <= 0 or s.horizon < 1:
             raise ConfigError("stop_atr, objetivo_atr y horizonte deben ser positivos")
+        if s.exit_style not in ("seguimiento", "objetivo"):
+            raise ConfigError('estilo_salida debe ser "seguimiento" u "objetivo"')
+        if not -1 <= self.decision_hour_utc <= 23:
+            raise ConfigError("hora_decision_utc debe estar entre 0 y 23 (o -1 para decidir en cada ciclo)")
+        if not 0 <= r.kelly_fraction <= 1 or not 0 <= r.vol_target <= 1:
+            raise ConfigError("fraccion_kelly y volatilidad_objetivo deben estar entre 0 y 1")
+        if not 0 < r.high_correlation <= r.max_correlation <= 1:
+            raise ConfigError("debe cumplirse 0 < correlacion_alta <= correlacion_maxima <= 1")
         if not 0 <= s.news_weight <= 0.5:
             raise ConfigError("peso_noticias debe estar entre 0 y 0.5: las noticias no deben mandar solas")
         if self.account in ("demo", "real") and not self.has_etoro_keys:
@@ -190,6 +217,8 @@ _GENERAL = {
     "base_de_datos": "db_path",
     "vigencia_sugerencias_horas": "suggestion_ttl_hours",
     "desvio_maximo_precio": "max_price_drift",
+    "referencia": "reference",
+    "hora_decision_utc": "decision_hour_utc",
 }
 _RISK = {
     "riesgo_por_operacion": "risk_per_trade",
@@ -207,8 +236,18 @@ _RISK = {
     "expectativa_minima": "min_expectancy_r",
     "muestras_minimas": "min_samples",
     "enfriamiento_horas": "cooldown_hours",
+    "volatilidad_objetivo": "vol_target",
+    "correlacion_maxima": "max_correlation",
+    "correlacion_alta": "high_correlation",
+    "fraccion_kelly": "kelly_fraction",
+    "reducir_con_drawdown": "drawdown_scaling",
+    "multiplicador_defensivo": "defensive_mult",
+    "detectar_desgaste": "decay_check",
+    "operaciones_min_desgaste": "decay_min_trades",
 }
 _STRATEGY = {
+    "estilo_salida": "exit_style",
+    "desacuerdo_maximo": "max_disagreement",
     "media_rapida": "fast_sma",
     "media_lenta": "slow_sma",
     "rsi": "rsi_period",

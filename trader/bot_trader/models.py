@@ -62,6 +62,8 @@ class Position:
     leverage: int = 1
     current_price: float | None = None
     pnl: float = 0.0
+    trailing: bool = False  # stop móvil: sube (o baja, en cortos) detrás del precio
+    trail_distance: float | None = None  # distancia fija entre el mejor precio y el stop
 
     @property
     def exposure(self) -> float:
@@ -85,12 +87,14 @@ class Account:
 
 @dataclass(frozen=True)
 class Probability:
-    """Estimación empírica de una operación con stop y objetivo fijos.
+    """Estimación de una operación con las mismas reglas de salida que usa el bot.
 
     - `p_win`: probabilidad de terminar con ganancia (incluye costos).
     - `expectancy_r`: ganancia esperada medida en "R" (1R = lo que se arriesga hasta el stop).
     - `n`: casos históricos parecidos al actual.
-    - `p_low`: límite inferior (95 %) de `p_win` en esos casos; con pocos casos baja mucho.
+    - `p_low`: límite inferior (95 %) de la tasa de acierto en esos casos; con pocos casos baja mucho.
+    - `p_hist` / `p_model`: las dos opiniones que se combinan (casos parecidos / regresión logística).
+    - `avg_win_r` / `avg_loss_r`: cuánto se gana cuando se gana y cuánto se pierde cuando se pierde.
     """
 
     p_win: float
@@ -99,6 +103,35 @@ class Probability:
     base_p_win: float
     base_expectancy_r: float
     p_low: float
+    p_hist: float | None = None
+    p_model: float | None = None
+    avg_win_r: float = 0.0
+    avg_loss_r: float = 1.0
+    calibrated: bool = False  # ajustada con el historial de aciertos del propio bot
+
+    @property
+    def disagreement(self) -> float:
+        if self.p_hist is None or self.p_model is None:
+            return 0.0
+        return abs(self.p_hist - self.p_model)
+
+    @property
+    def kelly(self) -> float:
+        """Fracción de Kelly (en unidades de riesgo): ventaja / (ganancia media x pérdida media)."""
+        if self.avg_win_r <= 0 or self.avg_loss_r <= 0:
+            return 0.0
+        return self.expectancy_r / (self.avg_win_r * self.avg_loss_r)
+
+
+@dataclass(frozen=True)
+class Regime:
+    """Estado del mercado general (según el activo de referencia, p. ej. SPY)."""
+
+    label: str = "sin referencia"  # alcista | neutral | defensivo | crisis | sin referencia
+    score: float = 0.0
+    risk_mult: float = 1.0
+    applies: bool = False  # True si el activo se mueve junto con el mercado
+    detail: str = ""
 
 
 @dataclass
@@ -120,6 +153,8 @@ class Signal:
     atr: float | None = None
     reasons: list[str] = field(default_factory=list)
     news: NewsView | None = None
+    regime: Regime | None = None
+    trailing: bool = False
 
     @property
     def opens_position(self) -> bool:
