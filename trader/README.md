@@ -11,6 +11,7 @@ Agente que opera solo y busca **ganancias sostenibles en el tiempo**, no las má
   - usa Kelly fraccional para no arriesgar de más;
   - arriesga menos cuando la cuenta cae o el mercado se pone bajista.
 - **Opera solo** en eToro (demo o real): decide una vez al día y vigila entre decisiones. Si deja de acertar lo que prometía, **se pausa solo**.
+- **Se ve en eToro y se maneja desde Telegram:** sus operaciones aparecen en tu cuenta, y por Telegram te avisa y recibe tus órdenes (pausar, cerrar, aprobar).
 - **Puede ganar también a la baja** con ventas en corto. Es opcional y viene apagado; más abajo se explica por qué y cómo decidir.
 
 > **Aviso.** Esto es una herramienta, no asesoría financiera. Ningún sistema gana siempre: los mercados cambian y el rendimiento pasado no garantiza el futuro. Empieza en papel, sigue en demo y pasa a dinero real solo con montos que puedas perder.
@@ -173,19 +174,57 @@ journalctl -u bot-trader -f                         # ver qué hace
 sudo crontab -u trader deploy/respaldo.cron         # respaldo diario (requiere: sudo apt install sqlite3)
 ```
 
-**Avisos por Telegram:**
-
-1. Crea un bot con @BotFather.
-2. Pon `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` en el `.env`.
-
-Recibes un resumen después de cada decisión diaria, más un aviso inmediato si se ejecuta un stop, si falla algo o si el agente se pausa.
-
 **Pausas automáticas** (se reanudan solo a mano, después de revisar):
 
 - **Drawdown:** la cuenta cayó más de 15 % desde su máximo.
 - **Desgaste del modelo:** en sus últimas operaciones ganó muchas menos veces de las que sus probabilidades prometían. La diferencia tiene que ser estadísticamente fuerte (z < −2, con al menos 15 operaciones). Señal de que el mercado cambió.
 
-**Comandos de control:**
+## Verlo en eToro y manejarlo desde Telegram
+
+Una vez instalado, el día a día es así:
+
+- **El agente vive en el servidor**, encendido las 24 horas. Tu computadora puede estar apagada.
+- **Sus operaciones aparecen en tu cuenta de eToro** (app o web) como cualquier otra posición, con su stop puesto. Las abre en tu cuenta con tus llaves de API. También puedes cerrar una a mano desde eToro: el agente lo detecta en su siguiente ronda y lo anota.
+- **Telegram es tu control remoto:** ahí te avisa y ahí le das órdenes.
+
+**Configurar Telegram (5 minutos):**
+
+1. En Telegram, háblale a @BotFather, envía `/newbot` y copia el token.
+2. Ábrele chat a tu bot nuevo y envíale `/start` (un bot no puede escribirte primero).
+3. Háblale a @userinfobot: el número "Id" que te contesta es tu chat id.
+4. Pon `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` en el `.env`.
+5. Corre `python -m bot_trader probar-telegram`: debe llegarte un mensaje.
+
+**Qué te avisa solo:**
+
+- un resumen después de cada decisión diaria;
+- cuando abre o cierra una posición, falla algo o se pausa;
+- cuando eToro ejecuta un stop: lo detecta en su siguiente ronda de vigilancia (cada 30 minutos);
+- "Agente en línea" cada vez que arranca.
+
+**Qué le puedes pedir** (mientras corre `correr`; contesta en segundos):
+
+| Comando | Qué hace |
+|---|---|
+| `/estado` | Capital, posiciones con su stop y frenos de riesgo. |
+| `/analisis` | Qué ve hoy en cada activo. Solo consulta, no opera. |
+| `/diario` | Últimas señales, órdenes y cierres. |
+| `/pausar` | Deja de abrir posiciones nuevas. Los stops siguen puestos. |
+| `/reanudar` | Vuelve a operar. |
+| `/cerrar SPY` | Cierra esa posición. Pide confirmación. |
+| `/cerrar_todo` | Cierra todas las posiciones del bot y lo pausa. Pide confirmación. |
+| `/aprobar 12` | Ejecuta la sugerencia #12 (con `modo = "sugerir"`). |
+| `/ayuda` | Lista de comandos. |
+
+**Seguridad del control remoto:**
+
+- Solo obedece al chat de `TELEGRAM_CHAT_ID`. Mensajes de cualquier otra persona se ignoran.
+- Cerrar posiciones pide un código de un solo uso que vence en 2 minutos (`/confirmar 4821`).
+- Desde Telegram **no** se puede cambiar la configuración: ni los límites de riesgo, ni pasar de demo a real, ni la lista de activos. Eso solo se cambia en el servidor. Si alguien entrara a tu Telegram, lo más que podría hacer es pausar el agente o cerrar posiciones.
+- Un comando que llegó mientras el agente estaba apagado (más de 10 minutos) no se ejecuta; te avisa para que lo repitas.
+- Activa la verificación en dos pasos de Telegram: tu cuenta de Telegram pasa a ser una llave del agente.
+
+Los mismos controles existen en el servidor, por si Telegram falla:
 
 | Comando | Qué hace |
 |---|---|
@@ -193,7 +232,7 @@ Recibes un resumen después de cada decisión diaria, más un aviso inmediato si
 | `python -m bot_trader cerrar-todo --si` | Cierra todas las posiciones del bot y lo pausa. |
 | `python -m bot_trader reanudar` | Vuelve a operar. |
 
-Si prefieres aprobar cada operación, usa `modo = "sugerir"` y `python -m bot_trader aprobar <número>`. Antes de ejecutar, el agente vuelve a validar la señal con datos frescos.
+Si prefieres aprobar cada operación, usa `modo = "sugerir"`: el agente te manda la sugerencia con su número y la ejecutas con `/aprobar <número>`. Antes de ejecutar, vuelve a validar la señal con datos frescos.
 
 ## Pasar a dinero REAL (solo después de semanas en demo)
 
@@ -226,6 +265,7 @@ Antes de empezar, toma en cuenta:
 
 ## Limitaciones (para no engañarse)
 
+- **El control por Telegram tampoco se probó contra Telegram real**, solo con un servidor falso. `probar-telegram` es la primera comprobación.
 - **Las rutas de eToro no se probaron en vivo.** Se tomaron de la documentación pública de eToro y de un cliente de código abierto que las verificó contra la API real; eso incluye el stop móvil (`stopLossType: "trailing"`). Las pruebas automáticas usan un servidor falso. Corre `verificar-etoro` y prueba en demo antes que nada. Si eToro cambia algo, todas las rutas están en `bot_trader/etoro.py`.
 - **La orden de venta en corto tampoco se probó en vivo.** Se envía como CFD con `sellShort`, según el mismo cliente de código abierto. Si eToro la rechaza, el agente lo reporta como orden fallida y no insiste.
 - **Los cortos no incluyen dividendos.** Quien está en corto paga el dividendo; el backtest no lo descuenta.
@@ -253,6 +293,8 @@ bot_trader/
   etoro.py                 cliente de la API pública de eToro
   sources.py               precios (eToro, Yahoo, CSV) y noticias (RSS)
   engine.py                el agente: vigilar, decidir una vez al día, desgaste del modelo
+  remote.py                control remoto por Telegram (comandos con confirmación)
+  notify.py                avisos por Telegram
   backtest.py              backtest con métricas de sostenibilidad, calidad de predicción y robustez
   db.py                    bitácora SQLite
   cli.py                   comandos

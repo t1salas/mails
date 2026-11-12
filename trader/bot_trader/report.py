@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from bot_trader.backtest import BacktestResult
-from bot_trader.engine import Analysis, CycleResult
+from bot_trader.db import now_utc
+from bot_trader.engine import Analysis, Bot, CycleResult, describe_age
+from bot_trader.risk import check_guards
 
 ACTION_LABEL = {
     "COMPRAR": "COMPRAR",
@@ -41,6 +43,59 @@ def analysis_detail(a: Analysis) -> list[str]:
         lines.append(f"    titulares ({s.news.method}):")
         lines += [f"      · {h.title}" + (f" ({h.source})" if h.source else "") for h in s.news.headlines[:3]]
     return lines
+
+
+def status_text(bot: Bot) -> str:
+    """Capital, frenos y posiciones del bot, con precios de este momento."""
+    s = bot.s
+    candles, _ = bot.fetch_candles(s.assets)
+    account = bot.broker.account({sym: bars[-1].close for sym, bars in candles.items()})
+    equity, cash = bot.bot_equity(account)
+    peak = max(float(bot.journal.get("pico", f"{equity}") or equity), equity)
+    day_start = float(bot.journal.get("inicio_dia", f"{equity}") or equity)
+    guard = check_guards(equity, peak, day_start, bot.risk.paused, s.risk)
+    out = [
+        f"Cuenta {ACCOUNT_LABEL[s.account]} | modo {s.mode}",
+        f"Capital del bot {equity:,.2f} USD | efectivo {cash:,.2f} | máximo histórico {peak:,.2f}",
+    ]
+    if s.account != "papel":
+        out.append(f"Capital total de la cuenta eToro {account.equity:,.2f} USD")
+    out.append("Frenos: " + ("OK, puede abrir posiciones" if guard.can_open else guard.reason))
+    if bot.risk.paused and bot.risk.pause_reason:
+        out.append(f"Motivo de la pausa: {bot.risk.pause_reason}")
+    out.append(f"Posiciones del bot ({len(account.positions)}):")
+    for p in account.positions:
+        stop = f"{p.stop:,.2f}" if p.stop is not None else "-"
+        exits = f"stop móvil {stop}" if p.trailing else f"stop {stop}  objetivo {p.target if p.target is not None else '-'}"
+        out.append(
+            f"  {p.symbol:<8} {'compra' if p.is_buy else 'corto':<6} {p.amount:>10,.2f} USD  P&L {p.pnl:+,.2f}  "
+            f"{exits}  desde {p.opened_at:%Y-%m-%d}"
+        )
+    out.append(f"P&L realizado acumulado: {bot.journal.realized_pnl():+,.2f} USD")
+    return "\n".join(out)
+
+
+def journal_text(bot: Bot, n: int = 20) -> str:
+    """Últimas señales, órdenes y operaciones cerradas."""
+    now = now_utc()
+    out = ["Señales recientes:"]
+    for r in bot.journal.recent_signals(n):
+        prob = f" p={r['probabilidad']:.0%} E={r['expectativa']:+.2f}R" if r["probabilidad"] is not None else ""
+        monto = f" {r['monto']:,.2f} USD" if r["monto"] else ""
+        out.append(
+            f"  #{r['id']:<4} {describe_age(r['ts'], now):<12} {r['accion']:<12} {r['simbolo']:<8} "
+            f"{r['precio']:>10,.2f}{monto}{prob}  [{r['estado']}]"
+        )
+    out.append("Órdenes:")
+    for r in bot.journal.recent_orders(n):
+        out.append(
+            f"  {describe_age(r['ts'], now):<12} {r['tipo']:<7} {r['simbolo']:<8} {r['estado']:<10} {r['posicion_id'] or ''}"
+        )
+    out.append("Operaciones cerradas:")
+    for r in bot.journal.closed_positions(n):
+        pnl = f"{r['pnl']:+,.2f}" if r["pnl"] is not None else "?"
+        out.append(f"  {r['simbolo']:<8} {r['abierta'][:10]} -> {r['cerrada'][:10]}  P&L {pnl}  ({r['motivo_cierre']})")
+    return "\n".join(out)
 
 
 def cycle_report(r: CycleResult, detailed: bool = True) -> str:

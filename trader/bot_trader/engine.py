@@ -524,15 +524,25 @@ class Bot:
         action = self._open(sig, size.amount, size.reason, signal_id=signal_id)
         return f"{action.kind.upper()}: {action.action} {asset.symbol} por {size.amount:,.2f} USD. {action.detail}"
 
-    def close_all(self, reason: str = "cierre manual de todas las posiciones") -> list[str]:
+    def close_all(self, reason: str = "cierre manual de todas las posiciones", symbol: str | None = None) -> list[str]:
+        """Cierra las posiciones del bot (todas, o solo la de `symbol`). Devuelve una línea por posición."""
         candles, _ = self.fetch_candles([a for a in self.s.assets])
         prices = {sym: bars[-1].close for sym, bars in candles.items()}
         account = self.broker.account(prices)
         out = []
         for p in account.positions:
+            if symbol is not None and p.symbol != symbol.upper():
+                continue
             exit_ = self._close(p, prices.get(p.symbol), reason)
-            out.append(f"{p.symbol}: {'cerrada' if exit_ else 'ERROR al cerrar'}")
+            if exit_ is None:
+                out.append(f"{p.symbol}: ERROR al cerrar")
+            else:
+                pnl = f"{exit_.pnl:+,.2f} USD" if exit_.pnl is not None else "P&L por confirmar en eToro"
+                out.append(f"{p.symbol}: cerrada ({pnl})")
         return out
+
+    def open_position_symbols(self) -> list[str]:
+        return [p.symbol for p in self.journal.open_positions()]
 
 
 def build_bot(settings: Settings) -> Bot:

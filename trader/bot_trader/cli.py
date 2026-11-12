@@ -11,6 +11,10 @@
   buscar TEXTO       busca instrumentos en eToro
   pausar / reanudar  freno de mano del bot
   cerrar-todo --si   cierra todas las posiciones del bot
+  probar-telegram    envía un mensaje de prueba y registra el menú de comandos
+
+Con Telegram configurado, mientras corre `correr` también obedece comandos desde el chat
+(/estado, /pausar, /reanudar, /cerrar, /cerrar_todo, /aprobar...).
 """
 
 from __future__ import annotations
@@ -23,7 +27,7 @@ import time
 
 from bot_trader.backtest import robustness, run_backtest
 from bot_trader.config import ConfigError, Settings, load_settings
-from bot_trader.engine import build_bot, describe_age
+from bot_trader.engine import build_bot
 from bot_trader.etoro import EtoroClient, EtoroError, ci_get, short_allowed
 from bot_trader.notify import send_telegram
 from bot_trader.report import (
@@ -32,10 +36,11 @@ from bot_trader.report import (
     analysis_line,
     backtest_report,
     cycle_report,
+    journal_text,
     robustness_report,
+    status_text,
 )
-from bot_trader.risk import check_guards
-from bot_trader.db import now_utc
+from bot_trader.remote import make_remote
 
 DEFAULT_CONFIG = "config/estrategia.toml"
 
@@ -93,6 +98,17 @@ def cmd_correr(args) -> int:
     hour = settings.decision_hour_utc
     when = "en cada ciclo" if hour < 0 else f"una vez al día desde las {hour:02d}:00 UTC"
     print(f"Agente corriendo: vigila cada {minutes} min y decide {when}. Ctrl+C para detener.")
+    remote = make_remote(lambda: _settings(args))
+    if remote is not None:
+        print("Control por Telegram activo: escríbele /ayuda a tu bot.")
+        try:
+            remote.channel.register_commands()
+        except Exception as exc:
+            logging.warning("No pude registrar el menú de comandos en Telegram: %s", type(exc).__name__)
+        remote.channel.send(
+            f"Agente en línea. Cuenta {ACCOUNT_LABEL[settings.account]}, modo {settings.mode}. "
+            f"Vigilo cada {minutes} min y decido {when}. /ayuda para ver los comandos."
+        )
     while True:
         try:
             _run_once(_settings(args), quiet_unless_noteworthy=True)
@@ -101,7 +117,28 @@ def cmd_correr(args) -> int:
         except Exception as exc:  # que un error de red no apague el bot
             logging.exception("Falló el ciclo: %s", exc)
             send_telegram(settings.telegram_token, settings.telegram_chat_id, f"Bot trader: falló un ciclo ({exc})")
-        time.sleep(minutes * 60)
+        if remote is not None:
+            remote.serve(minutes * 60)  # entre ciclos atiende los comandos de Telegram
+        else:
+            time.sleep(minutes * 60)
+
+
+def cmd_probar_telegram(args) -> int:
+    settings = _settings(args)
+    remote = make_remote(lambda: settings)
+    if remote is None:
+        print("Faltan TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID en el .env.")
+        return 1
+    if not remote.channel.send("Prueba del bot trader: si lees esto, los avisos funcionan. /ayuda para los comandos."):
+        print("No pude enviar el mensaje: revisa el token, el chat id, y que le hayas escrito /start a tu bot.")
+        return 1
+    try:
+        remote.channel.register_commands()
+    except Exception as exc:
+        print(f"El mensaje salió, pero no pude registrar el menú de comandos ({type(exc).__name__}).")
+        return 1
+    print("Mensaje enviado y menú de comandos registrado. Los comandos se atienden mientras corre `correr`.")
+    return 0
 
 
 def cmd_aprobar(args) -> int:
@@ -114,49 +151,12 @@ def cmd_aprobar(args) -> int:
 
 
 def cmd_estado(args) -> int:
-    settings = _settings(args)
-    bot = build_bot(settings)
-    candles, _ = bot.fetch_candles([a for a in settings.assets])
-    prices = {s: b[-1].close for s, b in candles.items()}
-    account = bot.broker.account(prices)
-    equity, cash = bot.bot_equity(account)
-    peak = float(bot.journal.get("pico", f"{equity}") or equity)
-    day_start = float(bot.journal.get("inicio_dia", f"{equity}") or equity)
-    guard = check_guards(equity, max(peak, equity), day_start, bot.risk.paused, settings.risk)
-    print(f"Cuenta {ACCOUNT_LABEL[settings.account]} | modo {settings.mode}")
-    print(f"Capital del bot {equity:,.2f} USD | efectivo {cash:,.2f} | máximo histórico {max(peak, equity):,.2f}")
-    if settings.account != "papel":
-        print(f"Capital total de la cuenta eToro {account.equity:,.2f} USD")
-    print("Frenos: " + ("OK, puede abrir posiciones" if guard.can_open else guard.reason))
-    if bot.risk.paused and bot.risk.pause_reason:
-        print(f"Motivo de la pausa: {bot.risk.pause_reason}")
-    print(f"Posiciones del bot ({len(account.positions)}):")
-    for p in account.positions:
-        stop = f"{p.stop:,.2f}" if p.stop is not None else "-"
-        exits = f"stop móvil {stop}" if p.trailing else f"stop {stop}  objetivo {p.target if p.target is not None else '-'}"
-        print(f"  {p.symbol:<8} {'compra' if p.is_buy else 'corto':<6} {p.amount:>10,.2f} USD  P&L {p.pnl:+,.2f}  "
-              f"{exits}  desde {p.opened_at:%Y-%m-%d}")
-    print(f"P&L realizado acumulado: {bot.journal.realized_pnl():+,.2f} USD")
+    print(status_text(build_bot(_settings(args))))
     return 0
 
 
 def cmd_diario(args) -> int:
-    settings = _settings(args)
-    bot = build_bot(settings)
-    now = now_utc()
-    print("Señales recientes:")
-    for r in bot.journal.recent_signals(args.n):
-        prob = f" p={r['probabilidad']:.0%} E={r['expectativa']:+.2f}R" if r["probabilidad"] is not None else ""
-        monto = f" {r['monto']:,.2f} USD" if r["monto"] else ""
-        print(f"  #{r['id']:<4} {describe_age(r['ts'], now):<12} {r['accion']:<12} {r['simbolo']:<8} "
-              f"{r['precio']:>10,.2f}{monto}{prob}  [{r['estado']}]")
-    print("Órdenes:")
-    for r in bot.journal.recent_orders(args.n):
-        print(f"  {describe_age(r['ts'], now):<12} {r['tipo']:<7} {r['simbolo']:<8} {r['estado']:<10} {r['posicion_id'] or ''}")
-    print("Operaciones cerradas:")
-    for r in bot.journal.closed_positions(args.n):
-        pnl = f"{r['pnl']:+,.2f}" if r["pnl"] is not None else "?"
-        print(f"  {r['simbolo']:<8} {r['abierta'][:10]} -> {r['cerrada'][:10]}  P&L {pnl}  ({r['motivo_cierre']})")
+    print(journal_text(build_bot(_settings(args)), args.n))
     return 0
 
 
@@ -301,6 +301,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--robustez", action="store_true", help="repite con variaciones de parámetros")
     p.set_defaults(fn=cmd_backtest)
     sub.add_parser("verificar-etoro").set_defaults(fn=cmd_verificar)
+    sub.add_parser("probar-telegram").set_defaults(fn=cmd_probar_telegram)
     p = sub.add_parser("buscar")
     p.add_argument("texto")
     p.set_defaults(fn=cmd_buscar)
