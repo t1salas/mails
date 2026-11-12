@@ -11,6 +11,7 @@ Agente que opera solo y busca **ganancias sostenibles en el tiempo**, no las má
   - usa Kelly fraccional para no arriesgar de más;
   - arriesga menos cuando la cuenta cae o el mercado se pone bajista.
 - **Opera solo** en eToro (demo o real): decide una vez al día y vigila entre decisiones. Si deja de acertar lo que prometía, **se pausa solo**.
+- **Puede ganar también a la baja** con ventas en corto. Es opcional y viene apagado; más abajo se explica por qué y cómo decidir.
 
 > **Aviso.** Esto es una herramienta, no asesoría financiera. Ningún sistema gana siempre: los mercados cambian y el rendimiento pasado no garantiza el futuro. Empieza en papel, sigue en demo y pasa a dinero real solo con montos que puedas perder.
 
@@ -87,6 +88,52 @@ Pruebas automáticas: `python -m pytest`.
 - **Calidad de las predicciones:** mejora sobre la tasa base y tabla de calibración.
 - **`--robustez`:** repite todo con stops, umbrales, medias y costos distintos. Si la mayoría de variantes pierde, la estrategia está sobreajustada al pasado: no la uses.
 
+## Ganar también a la baja (ventas en corto)
+
+En eToro no solo se gana cuando el precio sube: también se puede **vender en corto** y ganar cuando baja. El agente sabe hacerlo, pero viene **apagado** (`permitir_cortos = false`), porque en las pruebas no mejoró el resultado.
+
+**Qué hace el agente cuando el mercado cae, sin cortos:**
+
+- deja de comprar lo que se mueve con el mercado y se queda en efectivo;
+- puede comprar lo que suele subir cuando las acciones caen (bonos, oro), que ya están en la lista.
+
+**Qué agrega con los cortos encendidos.** Vende en corto un activo cuando su tendencia es bajista y la historia de *ese* activo muestra que esa operación tuvo ventaja. Usa los mismos dos modelos, con probabilidades calculadas y calibradas aparte para el lado corto. Reglas propias:
+
+| Regla | Por qué |
+|---|---|
+| Nunca va en corto contra un mercado alcista (si el activo se mueve con el mercado) | Ir contra la corriente es la forma más común de perder en corto. |
+| Un corto arriesga la mitad que una compra (`multiplicador_cortos`) | La pérdida en corto no tiene techo: el precio puede subir sin límite. |
+| Máximo 30 % del capital en cortos (`max_exposicion_cortos`) | Limita el daño de un rebote general del mercado. |
+| Stop móvil siempre, por encima del precio | Corta la pérdida si el precio rebota y asegura ganancia si sigue cayendo. |
+| Descuenta el costo por noche (`costo_anual_cfd`) | Un corto en eToro es un CFD y cobra por cada noche abierta. |
+| Una noticia buena con evento de riesgo (oferta de compra, resultados) veta el corto | Son los saltos al alza que más daño hacen. |
+| Si eToro no permite el corto en ese activo, no lo intenta | Depende del activo y del país de tu cuenta. |
+
+Además, vender en corto algo parecido a lo que ya tienes comprado se trata como **cobertura**, no como apuesta duplicada.
+
+**Por qué es más difícil ganar a la baja que al alza:**
+
+- Los mercados pasan más tiempo subiendo que bajando, y las caídas vienen con rebotes violentos.
+- Cada noche abierta cuesta dinero, así que el tiempo juega en contra.
+- El stop no protege de un hueco: si el precio abre muy arriba, se pierde más de lo previsto.
+- El agente solo va en corto cuando ya vio caídas parecidas en la historia del activo. Con 4–5 años de datos mayormente alcistas, tomará pocos cortos.
+
+**Resultado en las pruebas** (datos inventados; solo muestran el comportamiento):
+
+| Escenario | Solo compras | Con ventas en corto |
+|---|---|---|
+| Dos caídas largas del mercado | +1.2 % anual, peor caída 2.8 %, Sharpe 0.56 | +0.5 % anual, peor caída 3.9 %, Sharpe 0.21 |
+| Mercado mixto | +4.3 % anual, peor caída 4.2 %, Sharpe 1.04 | igual: no encontró ningún corto con ventaja |
+
+En el escenario de caídas tomó 16 cortos, ganó el 19 % y perdieron 183 USD en total: entró tarde y los rebotes lo sacaron. Con tus datos reales puede ser distinto, y por eso se mide en vez de suponerse.
+
+**Cómo decidir con tus datos:**
+
+1. Corre `python -m bot_trader backtest --robustez` con los cortos apagados. La fila **"con ventas en corto"** muestra qué pasaría al encenderlos.
+2. Si mejora el Calmar y el Sharpe, pon `permitir_cortos = true`. El reporte separa **Compras** y **Ventas en corto**, y el veredicto dice sin rodeos si los cortos sumaron o restaron.
+3. Corre `python -m bot_trader verificar-etoro`. Por cada activo dice si eToro permite venderlo en corto y qué costos cobra; ajusta `costo_anual_cfd` con eso.
+4. Pruébalo en demo antes que en real, como todo lo demás.
+
 ## Pasar a la cuenta DEMO de eToro (dinero virtual)
 
 1. En eToro entra a **Configuración → API** (o a api-portal.etoro.com) y crea una llave:
@@ -94,7 +141,7 @@ Pruebas automáticas: `python -m pytest`.
    - permisos de **lectura y escritura**.
 
    Copia la *API key* y la *user key* al `.env`.
-2. Verifica la conexión. Este comando solo lee: revisa las llaves, que cada símbolo exista en eToro y la cartera.
+2. Verifica la conexión. Este comando solo lee: revisa las llaves, que cada símbolo exista en eToro, si permite stop móvil y venta en corto, y la cartera.
    ```bash
    python -m bot_trader verificar-etoro
    python -m bot_trader buscar GLD          # si un símbolo no aparece, busca cómo se llama en eToro
@@ -166,7 +213,7 @@ Para activarlo:
 
 Antes de empezar, toma en cuenta:
 
-- **Costos de eToro.** Revisa la tabla de comisiones de eToro para tu país y ajusta `costo_por_lado`. Ese valor es lo que el agente descuenta en cada entrada y salida, en backtest y en papel. La cripto suele costar bastante más que las acciones (~1 % por lado). Las ventas en corto y el apalancamiento son CFDs con costo nocturno: por eso están apagados.
+- **Costos de eToro.** Revisa la tabla de comisiones de eToro para tu país y ajusta `costo_por_lado`. Ese valor es lo que el agente descuenta en cada entrada y salida, en backtest y en papel. La cripto suele costar bastante más que las acciones (~1 % por lado). Las ventas en corto y el apalancamiento son CFDs con costo por noche (`costo_anual_cfd`): vienen apagados.
 - **Impuestos.** Las ganancias pueden causar impuestos en tu país; la bitácora te sirve de registro.
 
 ## Costos de operar el agente
@@ -180,6 +227,8 @@ Antes de empezar, toma en cuenta:
 ## Limitaciones (para no engañarse)
 
 - **Las rutas de eToro no se probaron en vivo.** Se tomaron de la documentación pública de eToro y de un cliente de código abierto que las verificó contra la API real; eso incluye el stop móvil (`stopLossType: "trailing"`). Las pruebas automáticas usan un servidor falso. Corre `verificar-etoro` y prueba en demo antes que nada. Si eToro cambia algo, todas las rutas están en `bot_trader/etoro.py`.
+- **La orden de venta en corto tampoco se probó en vivo.** Se envía como CFD con `sellShort`, según el mismo cliente de código abierto. Si eToro la rechaza, el agente lo reporta como orden fallida y no insiste.
+- **Los cortos no incluyen dividendos.** Quien está en corto paga el dividendo; el backtest no lo descuenta.
 - **El desarrollo se validó con datos sintéticos.** No había acceso a datos reales de mercado desde el entorno de desarrollo. La evaluación que cuenta es la que corras tú con `backtest --robustez` sobre datos reales.
 - **Historia limitada:** eToro entrega como máximo 1000 velas (~4 años en diario); Yahoo da 5 años. Más historia hace las estadísticas más confiables.
 - **El backtest no incluye noticias:** no hay titulares históricos confiables.
@@ -198,7 +247,7 @@ bot_trader/
   analysis/model.py        regresión logística regularizada (entrenamiento hacia adelante)
   analysis/analyst.py      combina modelos, calibra, régimen de mercado y correlaciones
   analysis/sentiment.py    noticias con Claude (salida JSON estructurada) o palabras clave
-  strategy.py              decide COMPRAR / CERRAR / MANTENER / ESPERAR y explica por qué
+  strategy.py              decide COMPRAR / VENDER EN CORTO / CERRAR / MANTENER / ESPERAR y explica por qué
   risk.py                  tamaño con volatilidad, correlación, Kelly, drawdown y régimen; frenos
   brokers.py               cuenta de papel y eToro (demo/real), con stop móvil
   etoro.py                 cliente de la API pública de eToro

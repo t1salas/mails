@@ -14,6 +14,8 @@ Reglas para no engañarse:
   (Las que siguen abiertas, que suelen ser las ganadoras largas, no cuentan: sesgo conservador.)
 - Dentro de una vela se revisa primero el stop y después se mueve el stop con el máximo.
 - Si el precio abre con hueco más allá del stop, se sale al precio de apertura (peor que el stop).
+- Las ventas en corto (y las posiciones apalancadas) son CFDs: pagan un costo por cada noche que
+  siguen abiertas. Ese costo (`costo_anual_cfd`) se descuenta del resultado según los días.
 - Con pocos casos parecidos, la estimación se "encoge" hacia el promedio del activo
   (contracción bayesiana), para no creerle a cinco casos con suerte.
 """
@@ -78,9 +80,12 @@ class Outcome:
 
 
 def simulate_trade(
-    feats: Features, i: int, is_buy: bool, params: StrategyParams, cost_per_side: float
+    feats: Features, i: int, is_buy: bool, params: StrategyParams, cost_per_side: float, carry: float = 0.0
 ) -> Outcome | None:
-    """Simula entrar al cierre de la vela `i`. None si todavía no terminó o faltan datos."""
+    """Simula entrar al cierre de la vela `i`. None si todavía no terminó o faltan datos.
+
+    `carry` es el costo anual de mantener la posición (CFD), como fracción de su valor.
+    """
     a = feats.atr[i]
     n = len(feats)
     if a is None or a <= 0 or i + 1 >= n:
@@ -125,6 +130,9 @@ def simulate_trade(
         exit_price, exit_index = feats.close[last], last
     pnl = (exit_price - entry) if is_buy else (entry - exit_price)
     costs = 2 * cost_per_side * entry
+    if carry:
+        days = (feats.candles[exit_index].date - feats.candles[i].date).days
+        costs += entry * carry * days / 365
     return Outcome((pnl - costs) / dist, exit_index)
 
 
@@ -173,13 +181,15 @@ class _Bucket:
 class ProbabilityModel:
     """Modelo de "casos parecidos" para un lado (compra o venta en corto) de un activo."""
 
-    def __init__(self, feats: Features, params: StrategyParams, cost_per_side: float, is_buy: bool = True):
+    def __init__(
+        self, feats: Features, params: StrategyParams, cost_per_side: float, is_buy: bool = True, carry: float = 0.0
+    ):
         self.feats = feats
         self.params = params
         self.is_buy = is_buy
         self.states = [state_at(feats, i) for i in range(len(feats))]
         self.outcomes: list[Outcome | None] = [
-            simulate_trade(feats, i, is_buy, params, cost_per_side) if self.states[i] is not None else None
+            simulate_trade(feats, i, is_buy, params, cost_per_side, carry) if self.states[i] is not None else None
             for i in range(len(feats))
         ]
         by_state: dict[tuple[int, int], list[tuple[int, float]]] = {}

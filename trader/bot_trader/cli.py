@@ -24,7 +24,7 @@ import time
 from bot_trader.backtest import robustness, run_backtest
 from bot_trader.config import ConfigError, Settings, load_settings
 from bot_trader.engine import build_bot, describe_age
-from bot_trader.etoro import EtoroClient, EtoroError, ci_get
+from bot_trader.etoro import EtoroClient, EtoroError, ci_get, short_allowed
 from bot_trader.notify import send_telegram
 from bot_trader.report import (
     ACCOUNT_LABEL,
@@ -203,6 +203,8 @@ def cmd_verificar(args) -> int:
         except (EtoroError, LookupError) as exc:
             ok = False
             print(f"  {asset.symbol:<8} PROBLEMA: {exc}")
+            continue
+        print("           " + _eligibility_line(client, iid, settings))
     try:
         portfolio = client.portfolio()
         positions = ci_get(portfolio, "positions", default=[]) or []
@@ -212,6 +214,29 @@ def cmd_verificar(args) -> int:
         print(f"No pude leer la cartera {client.env} (¿la llave tiene permiso de lectura de trading?): {exc}")
     print("Todo en orden." if ok else "Hay problemas: revisa los símbolos (simbolo_etoro) o los permisos de la llave.")
     return 0 if ok else 1
+
+
+def _eligibility_line(client: EtoroClient, iid: int, settings: Settings) -> str:
+    """Qué permite eToro en este activo: venta en corto, stop móvil y lo que cobraría un corto."""
+    try:
+        elig = client.eligibility(iid)
+    except (EtoroError, LookupError) as exc:
+        return f"no pude consultar qué permite eToro aquí ({exc})"
+    can_short = short_allowed(elig, settings.risk.leverage)
+    trailing = ci_get(elig, "allowTrailingStopLoss")
+    yes_no = {True: "sí", False: "NO", None: "no informado"}
+    parts = [f"venta en corto: {yes_no[can_short]}", f"stop móvil: {yes_no[trailing]}"]
+    if can_short and settings.risk.allow_short:
+        try:
+            costs = client.cost_estimate(iid, False, 1000, settings.risk.leverage)
+            detail = ", ".join(
+                f"{ci_get(c, 'costType')} {ci_get(c, 'amount')} {ci_get(c, 'currency', default='')}".strip()
+                for c in costs
+            )
+            parts.append(f"costos de un corto de 1000 USD según eToro: {detail or 'sin datos'}")
+        except (EtoroError, LookupError) as exc:
+            parts.append(f"no pude estimar los costos del corto ({exc})")
+    return "  |  ".join(parts)
 
 
 def cmd_buscar(args) -> int:

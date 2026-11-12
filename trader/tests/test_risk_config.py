@@ -135,7 +135,7 @@ def test_risk_budget_adjustments():
     risk, notes = risk_budget(rp, TradeContext(correlations={"SPY": 0.75}), None)
     assert risk == pytest.approx(0.005) and "SPY" in notes[0]
     risk, notes = risk_budget(rp, TradeContext(correlations={"SPY": 0.9}), None)
-    assert risk == 0 and "casi igual" in notes[0]
+    assert risk == 0 and "casi la misma apuesta" in notes[0]
 
 
 def test_kelly_caps_and_vetoes():
@@ -177,3 +177,34 @@ def test_old_journal_is_migrated(tmp_path):
     assert old.symbol == "SPY" and not old.trailing and j.initial_stop("1") == 90
     j.add_position(pos("QQQ", 100))
     assert len(j.open_positions()) == 2
+
+
+def test_short_risk_rules():
+    rp = RiskParams(risk_per_trade=0.01, kelly_fraction=0)
+    crisis = Regime("crisis", -0.8, 0.0, applies=True)
+    # En crisis no se compra lo que sigue al mercado, pero sí se puede vender en corto (a mitad de riesgo)
+    assert risk_budget(rp, TradeContext(regime=crisis), None, is_buy=True)[0] == 0
+    risk, notes = risk_budget(rp, TradeContext(regime=crisis), None, is_buy=False)
+    assert risk == pytest.approx(0.005) and "venta en corto" in notes[0]
+
+
+def test_bet_correlation_sign():
+    from bot_trader.risk import bet_correlation
+
+    assert bet_correlation(0.9, same_side=True) == 0.9  # dos compras parecidas: misma apuesta
+    assert bet_correlation(0.9, same_side=False) == -0.9  # compra + corto de algo parecido: cobertura
+    rp = RiskParams(risk_per_trade=0.01, kelly_fraction=0)
+    hedge = TradeContext(correlations={"SPY": bet_correlation(0.92, False)})
+    assert risk_budget(rp, hedge, None, is_buy=False)[0] == pytest.approx(0.005)  # no se bloquea
+    duplicate = TradeContext(correlations={"TLT": bet_correlation(-0.9, False)})  # corto de lo contrario a TLT
+    assert risk_budget(rp, duplicate, None, is_buy=False)[0] == 0
+
+
+def test_short_exposure_cap():
+    rp = RiskParams(risk_per_trade=0.02, kelly_fraction=0, vol_target=0, max_short_exposure=0.30)
+    sig = Signal("X", "VENDER_CORTO", 100, is_buy=False, stop=105, probability=_prob(0.5))
+    shorts = [Position("B", "B", False, 2500, 1, 100, 110, None, START)]
+    d = size_trade(10_000, 10_000, shorts, sig, rp, TradeContext(), False)
+    assert d.ok and d.amount == pytest.approx(500) and "ventas en corto" in d.reason
+    longs = [pos("B", 2500)]
+    assert size_trade(10_000, 10_000, longs, sig, rp, TradeContext(), False).amount == pytest.approx(2000)

@@ -22,6 +22,7 @@ from bot_trader.etoro import (
     EtoroClient,
     EtoroError,
     ci_get,
+    short_allowed,
 )
 from bot_trader.models import Account, Candle, Position
 
@@ -78,6 +79,10 @@ class Broker(ABC):
         """Stops y objetivos alcanzados. En eToro los ejecuta el propio broker."""
         return []
 
+    def can_short(self, symbol: str, instrument_id: int | None, leverage: int = 1) -> tuple[bool, str]:
+        """¿Se puede vender en corto este activo? (permitido, motivo si no)."""
+        return True, ""
+
 
 def _pnl(p: Position, price: float) -> float:
     move = (price - p.entry_price) if p.is_buy else (p.entry_price - price)
@@ -89,9 +94,10 @@ class PaperBroker(Broker):
 
     name = "papel"
 
-    def __init__(self, journal: Journal, capital: float, cost_per_side: float):
+    def __init__(self, journal: Journal, capital: float, cost_per_side: float, cfd_annual_cost: float = 0.0):
         super().__init__(journal)
         self.cost = cost_per_side
+        self.cfd_annual_cost = cfd_annual_cost
         if journal.get("efectivo") is None:
             journal.set("efectivo", f"{capital:.2f}")
 
@@ -137,6 +143,9 @@ class PaperBroker(Broker):
         price = price if price is not None else position.current_price or position.entry_price
         exit_price = price * (1 - self.cost) if position.is_buy else price * (1 + self.cost)
         pnl = _pnl(position, exit_price)
+        if not position.is_buy or position.leverage > 1:  # CFD: paga por cada noche abierta
+            days = max((now_utc() - position.opened_at).days, 0)
+            pnl -= position.exposure * self.cfd_annual_cost * days / 365
         self._set_cash(self.cash + position.amount + pnl)
         self.journal.close_position(position.id, exit_price, pnl, reason)
         return Exit(position, exit_price, pnl, reason)
@@ -186,6 +195,25 @@ class EtoroBroker(Broker):
         self.client = client
         self.name = client.env
         self.real_money = not client.demo
+        self._eligibility: dict[int, dict | None] = {}
+
+    def eligibility(self, instrument_id: int | None) -> dict | None:
+        """Elegibilidad del instrumento, o None si eToro no la pudo dar (no bloquea la operación)."""
+        if instrument_id is None:
+            return None
+        if instrument_id not in self._eligibility:
+            try:
+                self._eligibility[instrument_id] = self.client.eligibility(instrument_id)
+            except Exception as exc:
+                log.warning("No pude consultar la elegibilidad del instrumento %s: %s", instrument_id, exc)
+                self._eligibility[instrument_id] = None
+        return self._eligibility[instrument_id]
+
+    def can_short(self, symbol: str, instrument_id: int | None, leverage: int = 1) -> tuple[bool, str]:
+        elig = self.eligibility(instrument_id)
+        if elig is not None and short_allowed(elig, leverage) is False:
+            return False, f"eToro no permite vender en corto {symbol} en esta cuenta"
+        return True, ""  # si no se sabe, decide eToro al recibir la orden
 
     def account(self, prices: dict[str, float]) -> Account:
         self._reconcile_pending()
@@ -250,6 +278,9 @@ class EtoroBroker(Broker):
             ex = execs[0]
             opening = ci_get(ex, "openingData", default={}) or {}
             asset = ci_get(info, "asset", default={}) or {}
+            side = str(ci_get(asset, "side", default="")).lower()
+            transaction = str(ci_get(info, "transaction", default="buy")).lower()
+            is_buy = side == "long" if side in ("long", "short") else transaction in ("buy", "buytocover")
             price = float(ci_get(opening, "avgPrice", default=0) or 0)
             units = ci_get(opening, "units") or ci_get(ex, "remainingUnits") or 0
             amount = float(ci_get(ex, "investedAmountCurrency", default=0) or ci_get(info, "requestedAmount", default=0) or 0)
@@ -257,7 +288,7 @@ class EtoroBroker(Broker):
                 id=str(ci_get(ex, "positionId", "positionID")),
                 symbol=symbol,
                 instrument_id=ci_get(asset, "instrumentId"),
-                is_buy=str(ci_get(info, "transaction", default="buy")).lower() in ("buy", "buytocover"),
+                is_buy=is_buy,
                 amount=amount,
                 units=float(units),
                 leverage=int(ci_get(asset, "leverage", default=1) or 1),
@@ -284,6 +315,11 @@ class EtoroBroker(Broker):
     def open(self, symbol, instrument_id, is_buy, amount, leverage, price, stop, target, trailing=False) -> Fill:
         if instrument_id is None:
             return Fill(False, message=f"no conozco el id de eToro de {symbol}")
+        note = ""
+        elig = self.eligibility(instrument_id)
+        if trailing and elig is not None and ci_get(elig, "allowTrailingStopLoss") is False:
+            trailing = False  # la posición queda protegida con stop fijo
+            note = f" (eToro no admite stop móvil en {symbol}: quedó con stop fijo)"
         reference = str(uuid.uuid4())
         try:
             ack = self.client.open_market_order(
@@ -302,6 +338,7 @@ class EtoroBroker(Broker):
             log.warning("No pude confirmar la orden %s: %s", order_id, exc)
             info = {}
         fill = self._apply_order_info(symbol, info, stop=stop, target=target, trailing=trailing)
+        fill.message += note
         fill.reference = reference
         fill.broker_order = str(order_id) if order_id is not None else None
         return fill

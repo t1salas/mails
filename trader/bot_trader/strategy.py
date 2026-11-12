@@ -1,6 +1,8 @@
 """Estrategia: junta tendencia, probabilidad, régimen de mercado y noticias en una decisión explicada.
 
-Cómo piensa (lado comprador; el corto es el espejo y está apagado por defecto):
+Cómo piensa (lado comprador). La venta en corto (`permitir_cortos`) es el espejo: entra cuando
+la tendencia es bajista, y nunca va en corto contra un mercado alcista si el activo se mueve
+con el mercado.
 
 ENTRAR solo si TODO esto se cumple:
   1. Puntaje combinado (técnico + noticias) por encima de `umbral_entrada`.
@@ -151,6 +153,8 @@ def evaluate(
             blockers.append(f"RSI {rsi:.0f} en sobreventa: mejor esperar un rebote")
         if is_buy and regime is not None and regime.applies and regime.label == "crisis":
             blockers.append(f"mercado en crisis ({regime.detail}): se protege el capital")
+        if not is_buy and regime is not None and regime.applies and regime.label == "alcista":
+            blockers.append(f"mercado alcista ({regime.detail}): no se vende en corto contra el mercado")
         if (is_buy and bad_event) or (not is_buy and news and news.risk_event and news.score > 0):
             blockers.append(f"evento de riesgo en las noticias: {news.summary}")
         side = "compra" if is_buy else "venta en corto"

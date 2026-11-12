@@ -36,3 +36,25 @@ def universe(n=1000):
         "TLT": asset(m, -0.2, 0.008, -0.0001, 6),
         "BTC": asset(m, 0.4, 0.030, 0.0005, 7),
     }
+
+
+def bear_market(schedule=((260, 0.0009), (200, -0.0020), (300, 0.0008), (220, -0.0019), (320, 0.0007)), seed=21):
+    """Mercado con dos caídas largas (como 2008 o 2022) separadas por subidas."""
+    rnd = random.Random(seed)
+    out = []
+    for bars, drift in schedule:
+        out += [rnd.gauss(drift, 0.011) for _ in range(bars)]
+    return out
+
+
+def bear_universe():
+    """Universo para probar las ventas en corto: acciones que caen con el mercado y refugios que no."""
+    m = bear_market()
+    return {
+        "SPY": asset(m, 1.0, 0.003, 0.0, 1),
+        "QQQ": asset(m, 1.3, 0.006, 0.0, 2),
+        "AAPL": asset(m, 1.1, 0.012, 0.0, 3),
+        "NVDA": asset(m, 1.6, 0.020, 0.0, 4),
+        "GLD": asset(m, 0.05, 0.009, 0.0002, 5),
+        "TLT": asset(m, -0.2, 0.008, 0.0, 6),
+    }

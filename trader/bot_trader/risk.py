@@ -15,7 +15,10 @@ Ajustes para que la ganancia sea sostenible (no la más rápida):
   (sería duplicar la misma apuesta); si se parece bastante, se arriesga la mitad.
 - Kelly fraccional: nunca se arriesga más de 1/4 de lo que la ventaja estimada justificaría.
 - Drawdown: mientras más se cae desde el máximo, menos se arriesga (de 100 % a 25 %).
-- Régimen: con mercado bajista se arriesga la mitad en lo que se mueve con el mercado.
+- Régimen: con mercado bajista se arriesga la mitad al COMPRAR lo que se mueve con el mercado.
+- Ventas en corto: arriesgan la mitad que una compra y tienen un tope propio de exposición.
+  Perder en corto no tiene techo (el precio puede subir sin límite y abrir con hueco), así
+  que se tratan con más cuidado.
 
 Frenos automáticos:
 - Pérdida diaria máxima: si el capital cae X % en el día, no abre nada más hasta mañana.
@@ -125,10 +128,19 @@ class TradeContext:
     drawdown: float = 0.0  # caída actual desde el máximo (0.05 = -5 %)
     regime: Regime | None = None
     annual_vol: float | None = None  # volatilidad anual del activo
-    correlations: dict[str, float] = field(default_factory=dict)  # con cada posición abierta
+    # Correlación "de apuesta" con cada posición abierta: ya trae el signo según el lado.
+    # Comprar QQQ teniendo SPY comprado es duplicar (+0.9); venderlo en corto es cubrirse (-0.9).
+    correlations: dict[str, float] = field(default_factory=dict)
 
 
-def risk_budget(params: RiskParams, ctx: TradeContext, prob: Probability | None) -> tuple[float, list[str]]:
+def bet_correlation(corr: float, same_side: bool) -> float:
+    """Correlación entre dos apuestas: positiva si ganan y pierden juntas."""
+    return corr if same_side else -corr
+
+
+def risk_budget(
+    params: RiskParams, ctx: TradeContext, prob: Probability | None, is_buy: bool = True
+) -> tuple[float, list[str]]:
     """Fracción del capital a arriesgar en esta entrada, con la explicación de cada ajuste."""
     risk = params.risk_per_trade
     notes: list[str] = []
@@ -137,13 +149,18 @@ def risk_budget(params: RiskParams, ctx: TradeContext, prob: Probability | None)
         if mult < 0.999:
             risk *= mult
             notes.append(f"riesgo x{mult:.2f} porque la cuenta está {ctx.drawdown:.1%} bajo su máximo")
-    if ctx.regime is not None and ctx.regime.applies and ctx.regime.risk_mult < 1:
-        risk *= ctx.regime.risk_mult
-        notes.append(f"riesgo x{ctx.regime.risk_mult:.2f} por mercado {ctx.regime.label}")
+    if is_buy:
+        # Un mercado bajista es un viento en contra para comprar, no para vender en corto.
+        if ctx.regime is not None and ctx.regime.applies and ctx.regime.risk_mult < 1:
+            risk *= ctx.regime.risk_mult
+            notes.append(f"riesgo x{ctx.regime.risk_mult:.2f} por mercado {ctx.regime.label}")
+    elif params.short_mult < 1:
+        risk *= params.short_mult
+        notes.append(f"riesgo x{params.short_mult:.2f} por ser venta en corto")
     if ctx.correlations:
         symbol, corr = max(ctx.correlations.items(), key=lambda kv: kv[1])
         if corr >= params.max_correlation:
-            return 0.0, [f"se mueve casi igual que {symbol} (correlación {corr:.2f}), que ya está en cartera"]
+            return 0.0, [f"es casi la misma apuesta que {symbol}, que ya está en cartera (correlación {corr:.2f})"]
         if corr >= params.high_correlation:
             risk *= 0.5
             notes.append(f"riesgo a la mitad: correlación {corr:.2f} con {symbol}")
@@ -168,10 +185,14 @@ def size_trade(
     real_account: bool,
 ) -> SizeDecision:
     """Tamaño de una entrada con todos los ajustes del perfil sostenible."""
-    risk, notes = risk_budget(params, ctx, sig.probability)
+    risk, notes = risk_budget(params, ctx, sig.probability, sig.is_buy)
     if risk <= 0:
         return SizeDecision(False, reason="; ".join(notes) or "sin presupuesto de riesgo")
     extra = []
+    if not sig.is_buy:
+        used_short = sum(p.exposure for p in positions if not p.is_buy)
+        room = max(params.max_short_exposure * equity - used_short, 0.0)
+        extra.append((room / params.leverage, "máximo en ventas en corto"))
     if params.vol_target > 0 and ctx.annual_vol and ctx.annual_vol > 0:
         weight = params.vol_target / (ctx.annual_vol * math.sqrt(max(params.max_positions, 1)))
         extra.append((weight * equity / params.leverage, f"volatilidad objetivo (activo con {ctx.annual_vol:.0%} anual)"))

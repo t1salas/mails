@@ -64,6 +64,8 @@ class RiskParams:
     max_drawdown: float = 0.15  # al caer esto desde el máximo, el bot se pausa
     leverage: int = 1
     allow_short: bool = False
+    short_mult: float = 0.5  # una venta en corto arriesga la mitad que una compra
+    max_short_exposure: float = 0.30  # máximo del capital vendido en corto a la vez
     min_order: float = 50.0
     max_order_real: float = 250.0  # tope duro por orden en la cuenta real
     bot_capital: float = 0.0  # 0 = usa todo el capital de la cuenta
@@ -121,6 +123,7 @@ class Settings:
     candles: int = 1000
     paper_capital: float = 10_000.0
     cost_per_side: float = 0.0015
+    cfd_annual_cost: float = 0.08  # costo anual de mantener un CFD (cortos y apalancadas); supuesto a verificar
     db_path: str = "trader.db"
     suggestion_ttl_hours: float = 24.0
     max_price_drift: float = 0.015  # al aprobar una sugerencia, cuánto se pudo mover el precio
@@ -183,6 +186,11 @@ class Settings:
             raise ConfigError("media_rapida debe ser menor que media_lenta")
         if s.stop_atr <= 0 or s.target_atr <= 0 or s.horizon < 1:
             raise ConfigError("stop_atr, objetivo_atr y horizonte deben ser positivos")
+        if not 0 < r.short_mult <= 1 or not 0 <= r.max_short_exposure <= r.max_total_exposure:
+            raise ConfigError("multiplicador_cortos debe estar entre 0 y 1, y max_exposicion_cortos no puede "
+                              "superar max_exposicion_total")
+        if not 0 <= self.cfd_annual_cost <= 0.5:
+            raise ConfigError("costo_anual_cfd debe estar entre 0 y 0.5 (50 % anual)")
         if s.exit_style not in ("seguimiento", "objetivo"):
             raise ConfigError('estilo_salida debe ser "seguimiento" u "objetivo"')
         if not -1 <= self.decision_hour_utc <= 23:
@@ -214,6 +222,7 @@ _GENERAL = {
     "velas": "candles",
     "capital_papel": "paper_capital",
     "costo_por_lado": "cost_per_side",
+    "costo_anual_cfd": "cfd_annual_cost",
     "base_de_datos": "db_path",
     "vigencia_sugerencias_horas": "suggestion_ttl_hours",
     "desvio_maximo_precio": "max_price_drift",
@@ -229,6 +238,8 @@ _RISK = {
     "drawdown_maximo": "max_drawdown",
     "apalancamiento": "leverage",
     "permitir_cortos": "allow_short",
+    "multiplicador_cortos": "short_mult",
+    "max_exposicion_cortos": "max_short_exposure",
     "monto_minimo": "min_order",
     "monto_maximo_real": "max_order_real",
     "capital_maximo_bot": "bot_capital",

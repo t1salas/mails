@@ -79,7 +79,7 @@ class Analyst:
             market = [self._ref_score(d) for d in self.dates[symbol]] if self.ref else None
             rows = feature_rows(f, market)
             self.rows[symbol] = rows
-            self.hist[symbol] = {side: ProbabilityModel(f, sp, cost, side) for side in self.sides}
+            self.hist[symbol] = {side: ProbabilityModel(f, sp, cost, side, self.carry(side)) for side in self.sides}
             for side in self.sides:
                 outcomes = self.hist[symbol][side].outcomes
                 for i, row in enumerate(rows):
@@ -117,6 +117,10 @@ class Analyst:
                 raw = h.p_hist if model is None else (h.p_hist + model.predict(row)) / 2
                 out.add(dates[out_i.resolved], [logit(raw)], out_i.r > 0)
         return out
+
+    def carry(self, is_buy: bool) -> float:
+        """Costo anual de mantener la posición: solo los CFDs (cortos y apalancadas) lo pagan."""
+        return self.s.cfd_annual_cost if (not is_buy or self.s.risk.leverage > 1) else 0.0
 
     # --- entrenamiento -------------------------------------------------------------------
 

@@ -2,7 +2,8 @@
 
 Supuestos (conservadores a propósito):
 - La decisión se toma al cierre de la vela y se ejecuta en la apertura de la siguiente.
-- Se cobra `costo_por_lado` al entrar y al salir.
+- Se cobra `costo_por_lado` al entrar y al salir, y `costo_anual_cfd` por cada día que una venta
+  en corto (o una posición apalancada) sigue abierta.
 - Dentro de una vela se revisa primero el stop y después se mueve el stop móvil con el máximo.
   Los huecos de precio se ejecutan al precio de apertura, no al del stop.
 - Probabilidades y modelo estadístico solo usan operaciones que ya habían terminado en esa
@@ -26,7 +27,7 @@ from bot_trader.analysis.analyst import Analyst
 from bot_trader.analysis.indicators import max_drawdown
 from bot_trader.config import Settings
 from bot_trader.models import Candle, Position
-from bot_trader.risk import TradeContext, size_trade
+from bot_trader.risk import TradeContext, bet_correlation, size_trade
 
 RETRAIN_DAYS = 30
 
@@ -47,11 +48,12 @@ class Trade:
 
 @dataclass
 class Prediction:
-    p: float  # probabilidad final (promedio de los dos modelos)
+    p: float  # probabilidad final (calibrada)
     p_hist: float | None
     p_model: float | None
     base: float  # tasa de acierto histórica del activo (la referencia "tonta")
     won: bool
+    is_buy: bool = True
 
 
 def _brier(pairs: list[tuple[float, bool]]) -> float | None:
@@ -198,6 +200,18 @@ class BacktestResult:
     def avg_r(self) -> float:
         return sum(t.r for t in self.trades) / len(self.trades) if self.trades else 0.0
 
+    def side_stats(self, is_buy: bool) -> dict | None:
+        """Resumen de las compras (True) o de las ventas en corto (False)."""
+        trades = [t for t in self.trades if t.is_buy == is_buy]
+        if not trades:
+            return None
+        return {
+            "n": len(trades),
+            "win_rate": sum(1 for t in trades if t.pnl > 0) / len(trades),
+            "pnl": sum(t.pnl for t in trades),
+            "avg_r": sum(t.r for t in trades) / len(trades),
+        }
+
     @property
     def avg_days(self) -> float:
         return sum((t.exit_date - t.entry_date).days for t in self.trades) / len(self.trades) if self.trades else 0.0
@@ -213,6 +227,12 @@ class BacktestResult:
         preds = self.predictions
         base = _brier([(p.base, p.won) for p in preds])
         out = {"n": len(preds), "base": base}
+        for key, side in (("largos", True), ("cortos", False)):
+            group = [p for p in preds if p.is_buy == side]
+            b0 = _brier([(p.base, p.won) for p in group])
+            b1 = _brier([(p.p, p.won) for p in group])
+            out[f"{key}_n"] = len(group)
+            out[f"{key}_skill"] = (1 - b1 / b0) if b0 and b1 is not None else None
         for key, pairs in (
             ("final", [(p.p, p.won) for p in preds]),
             ("hist", [(p.p_hist, p.won) for p in preds if p.p_hist is not None]),
@@ -278,6 +298,9 @@ def run_backtest(
         p = positions.pop(symbol)
         exit_price = raw_price * (1 - cost) if p.is_buy else raw_price * (1 + cost)
         pnl = ((exit_price - p.entry_price) if p.is_buy else (p.entry_price - exit_price)) * p.units
+        carry = analyst.carry(p.is_buy)
+        if carry:
+            pnl -= p.exposure * carry * (d - p.opened_at.date()).days / 365
         cash += p.amount + pnl
         risk = risk_at_entry.pop(symbol, 0) or 1.0
         result.trades.append(
@@ -358,12 +381,13 @@ def run_backtest(
             if t is None:
                 continue
             sig = analyst.evaluate(symbol, t, positions.get(symbol), None)
-            prob = analyst.probability(symbol, t, True)
-            outcome = analyst.hist[symbol][True].outcomes[t]
-            if prob is not None and outcome is not None:
-                result.predictions.append(
-                    Prediction(prob.p_win, prob.p_hist, prob.p_model, prob.base_p_win, outcome.r > 0)
-                )
+            for side in analyst.sides:
+                prob = analyst.probability(symbol, t, side)
+                outcome = analyst.hist[symbol][side].outcomes[t]
+                if prob is not None and outcome is not None:
+                    result.predictions.append(
+                        Prediction(prob.p_win, prob.p_hist, prob.p_model, prob.base_p_win, outcome.r > 0, side)
+                    )
             if sig.action == "CERRAR":
                 pending[symbol] = ("close", "tesis rota")
             elif sig.opens_position and not daily_halt:
@@ -379,7 +403,7 @@ def run_backtest(
             for p in open_now:
                 c = analyst.correlation(sig.symbol, p.symbol, d)
                 if c is not None:
-                    correlations[p.symbol] = c
+                    correlations[p.symbol] = bet_correlation(c, p.is_buy == sig.is_buy)
             ctx = TradeContext(
                 drawdown=drawdown,
                 regime=analyst.regime_for(sig.symbol, d),
@@ -443,6 +467,11 @@ def robustness(
         ("medias 60/240", lambda s: (setattr(s.strategy, "fast_sma", 60), setattr(s.strategy, "slow_sma", 240))),
         ("costos al doble", lambda s: setattr(s, "cost_per_side", s.cost_per_side * 2)),
     ]
+    if settings.risk.allow_short:
+        variants.append(("sin ventas en corto", lambda s: setattr(s.risk, "allow_short", False)))
+        variants.append(("costo CFD al doble", lambda s: setattr(s, "cfd_annual_cost", s.cfd_annual_cost * 2)))
+    else:
+        variants.append(("con ventas en corto", lambda s: setattr(s.risk, "allow_short", True)))
     out = []
     for label, change in variants:
         variant = deepcopy(settings)

@@ -46,6 +46,18 @@ def steady_trend(n: int = 600, start: float = 100.0, step: float = 0.004, wiggle
     return out
 
 
+def steady_downtrend(n: int = 600, start: float = 400.0, step: float = 0.004, wiggle: float = 0.01) -> list[Candle]:
+    """Tendencia bajista limpia con rebotes regulares (espejo de `steady_trend`)."""
+    out = []
+    price = start
+    for i in range(n):
+        o = price
+        c = o * (1 - step - wiggle * math.sin(i / 3))
+        out.append(Candle(START + timedelta(days=i), o, max(o, c) * 1.003, min(o, c) * 0.997, c, 1e6))
+        price = c
+    return out
+
+
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     s = Settings(

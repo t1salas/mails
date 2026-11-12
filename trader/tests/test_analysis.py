@@ -12,7 +12,7 @@ from bot_trader.analysis.trend import compute_features
 from bot_trader.config import Asset, RiskParams, Settings, StrategyParams
 from bot_trader.models import Candle, NewsView, Position, Probability, Regime
 from bot_trader.strategy import evaluate
-from tests.conftest import START, make_series, steady_trend
+from tests.conftest import START, make_series, steady_downtrend, steady_trend
 from tests.synthetic import universe
 
 SP = StrategyParams()
@@ -207,3 +207,50 @@ def test_analyst_correlations_and_regime_scope(analyst):
     assert analyst.regime_for("QQQ", d).applies
     assert not analyst.regime_for("GLD", d).applies  # el oro va por su lado
     assert analyst.annual_vol("BTC", len(analyst.feats["BTC"]) - 1) > analyst.annual_vol("SPY", len(analyst.feats["SPY"]) - 1)
+
+
+# --- ventas en corto -------------------------------------------------------------------------
+
+
+def _evaluate_short(feats, regime=None, news=None, probability="auto"):
+    t = len(feats) - 1
+    p = ProbabilityModel(feats, SP, 0.0015, is_buy=False).at(t) if probability == "auto" else probability
+    return evaluate("X", feats, t, None, p, news, None, SP, RiskParams(allow_short=True), regime=regime)
+
+
+def test_short_entry_in_clean_downtrend():
+    feats = compute_features(steady_downtrend(), SP)
+    sig = _evaluate_short(feats)
+    assert sig.action == "VENDER_CORTO", sig.reasons
+    assert not sig.is_buy and sig.trailing and sig.target is None
+    assert sig.stop == pytest.approx(sig.price + SP.stop_atr * feats.atr[-1])  # el stop va ARRIBA del precio
+    # Con los cortos apagados (por defecto), la misma situación es solo "esperar"
+    assert _evaluate(feats).action == "ESPERAR"
+
+
+def test_no_shorting_against_a_bull_market():
+    feats = compute_features(steady_downtrend(), SP)
+    bull = Regime("alcista", 0.7, 1.0, applies=True, detail="SPY sobre su media de 200")
+    sig = _evaluate_short(feats, regime=bull, probability=prob())
+    assert sig.action == "ESPERAR" and any("contra el mercado" in r for r in sig.reasons)
+    # Si el activo va por su lado, o el mercado está en crisis, el corto sí procede
+    assert _evaluate_short(feats, regime=replace(bull, applies=False), probability=prob()).action == "VENDER_CORTO"
+    crisis = Regime("crisis", -0.8, 0.0, applies=True)
+    assert _evaluate_short(feats, regime=crisis, probability=prob()).action == "VENDER_CORTO"
+
+
+def test_good_news_event_vetoes_short():
+    feats = compute_features(steady_downtrend(), SP)
+    good = NewsView("X", score=0.3, impact="medio", risk_event=True, summary="oferta de compra", method="ia")
+    sig = _evaluate_short(feats, news=good, probability=prob())
+    assert sig.action == "ESPERAR" and any("evento de riesgo" in r for r in sig.reasons)
+
+
+def test_short_pays_overnight_cost():
+    bars = flat(40)
+    feats = compute_features(bars, SP)
+    params = replace(SP, exit_style="objetivo", stop_atr=2.0, target_atr=50.0, horizon=10)
+    free = simulate_trade(feats, 20, False, params, 0.0)
+    paid = simulate_trade(feats, 20, False, params, 0.0, carry=0.073)  # 7.3 % anual = 0.02 % diario
+    assert free.r == pytest.approx(0.0)
+    assert paid.r == pytest.approx(-(100 * 0.073 * 10 / 365) / (2 * feats.atr[20]))

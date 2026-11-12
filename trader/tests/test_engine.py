@@ -9,7 +9,7 @@ from bot_trader.engine import Bot
 from bot_trader.models import Account, Candle
 from bot_trader.report import backtest_report, cycle_report
 from bot_trader.sources import PriceSource
-from tests.conftest import make_series, steady_trend
+from tests.conftest import make_series, steady_downtrend, steady_trend
 
 
 class FakePrices(PriceSource):
@@ -196,7 +196,7 @@ def test_correlated_duplicate_is_not_bought_twice(settings):
     bot = make_bot(settings, {"UP": steady_trend(), "UP2": steady_trend(start=50)})
     r = bot.run_cycle()
     assert [a.kind for a in r.actions] == ["sugerida", "bloqueada"]
-    assert "se mueve casi igual" in r.actions[1].detail
+    assert "casi la misma apuesta" in r.actions[1].detail
 
 
 def test_paper_trailing_stop_locks_in_profit(settings, data):
@@ -241,3 +241,74 @@ def _prob(p):
     from bot_trader.models import Probability
 
     return Probability(p, 0.5, 100, 0.5, 0.1, 0.4)
+
+
+# --- ventas en corto -------------------------------------------------------------------------
+
+
+def test_autonomous_short_in_paper_then_stopped(settings):
+    from bot_trader.config import Asset
+
+    settings.mode = "autonomo"
+    settings.risk.allow_short = True
+    settings.assets = [Asset("DOWN")]
+    data = {"DOWN": steady_downtrend()}
+    bot = make_bot(settings, data)
+    r = bot.run_cycle()
+    assert [(a.kind, a.action) for a in r.actions] == [("ejecutada", "VENDER_CORTO")]
+    assert "venta en corto" in r.actions[0].detail  # arriesga la mitad que una compra
+    p = bot.journal.open_positions()[0]
+    assert not p.is_buy and p.trailing and p.stop > p.entry_price
+    # El precio rebota y rompe el stop: pérdida acotada
+    last = data["DOWN"][-1]
+    spike = p.stop * 1.02
+    data["DOWN"] = data["DOWN"] + [Candle(now_utc() + timedelta(days=1), last.close, spike, last.close, spike * 0.99)]
+    r2 = bot.run_cycle()
+    assert [e.reason for e in r2.exits] == ["stop móvil alcanzado"]
+    assert -10_000 * 0.0075 * 0.5 * 1.3 < r2.exits[0].pnl < 0
+
+
+def test_shorts_are_off_by_default(settings):
+    from bot_trader.config import Asset
+
+    settings.assets = [Asset("DOWN")]
+    r = make_bot(settings, {"DOWN": steady_downtrend()}).run_cycle()
+    assert not r.actions and r.analyses[0].signal.action == "ESPERAR"
+
+
+def test_paper_short_pays_overnight_cost(settings):
+    from bot_trader.models import Position
+
+    journal = Journal(settings.db_path, "papel")
+    broker = PaperBroker(journal, 10_000, 0.0, cfd_annual_cost=0.073)
+    opened = now_utc() - timedelta(days=10, hours=1)
+    p = Position("s1", "X", False, 1000, 10, 100, 110, None, opened)
+    journal.add_position(p)
+    exit_ = broker.close(p, 100.0, "prueba")  # el precio no se movió: solo se pagó por 10 noches
+    assert exit_.pnl == pytest.approx(-1000 * 0.073 * 10 / 365)
+
+
+def test_backtest_with_shorts_reports_each_side(settings):
+    from bot_trader.backtest import robustness
+    from bot_trader.config import Asset
+    from bot_trader.report import robustness_report
+    from tests.synthetic import bear_universe
+
+    data = bear_universe()
+    settings.assets = [Asset(k) for k in data]
+    settings.reference = "SPY"
+    settings.risk.allow_short = True
+    res = run_backtest(settings, data)
+    shorts = res.side_stats(False)
+    assert shorts and shorts["n"] > 0 and res.side_stats(True)["n"] > 0
+    assert all(t.exit_date >= t.entry_date for t in res.trades)
+    text = backtest_report(res, list(data))
+    assert "Ventas en corto:" in text and "Compras:" in text and "Por lado:" in text
+    assert "las ventas en corto" in text.lower().split("veredicto")[-1]  # el veredicto dice si sumaron o restaron
+    small = {"SPY": data["SPY"][:700]}
+    labels = [label for label, _ in robustness(settings, small)]
+    assert "sin ventas en corto" in labels and "costo CFD al doble" in labels
+    settings.risk.allow_short = False
+    results = robustness(settings, small)
+    assert "con ventas en corto" in [label for label, _ in results]
+    assert "Robustez" in robustness_report(results)

@@ -13,6 +13,9 @@ Notas verificadas del API:
 - Un id de instrumento desconocido devuelve 200 con "candles": null, no un error.
 - Abrir orden: POST v2 .../orders con cuerpo en camelCase. Cerrar posición: POST v1 con
   cuerpo en PascalCase (y la llave del instrumento cambia de mayúsculas entre demo y real).
+- Comprar sin apalancamiento es el activo real ("buy" + settlementType "real"). Vender en corto
+  es un CFD ("sellShort" + settlementType "cfd"): paga costo por noche y no todos los activos
+  ni todos los países lo permiten; el endpoint de elegibilidad lo dice por instrumento.
 - El x-request-id de una orden sirve como llave de idempotencia (vuelve como referenceId).
 """
 
@@ -60,6 +63,11 @@ PATHS = {
         "demo": "/api/v1/trading/execution/demo/market-close-orders/positions/{pid}",
         "real": "/api/v1/trading/execution/market-close-orders/positions/{pid}",
     },
+    "eligibility": {
+        "demo": "/api/v2/trading/info/demo/eligibility",
+        "real": "/api/v2/trading/info/eligibility",
+    },
+    "costs": {"demo": "/api/v2/trading/info/demo/costs", "real": "/api/v2/trading/info/costs"},
 }
 
 
@@ -247,16 +255,31 @@ class EtoroClient:
         Con `trailing=True` el stop es móvil: eToro lo va subiendo (o bajando en cortos) detrás del
         precio a la misma distancia con la que se abrió, aunque el bot esté apagado.
         """
+        body = self.order_body(instrument_id, is_buy, amount, leverage, stop_loss, take_profit, trailing)
+        request_id = request_id or str(uuid.uuid4())
+        data = self.request("POST", PATHS["order"][self.env], body=body, request_id=request_id)
+        data.setdefault("referenceId", request_id)
+        return data
+
+    @staticmethod
+    def order_body(
+        instrument_id: int,
+        is_buy: bool,
+        amount: float,
+        leverage: int = 1,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
+        trailing: bool = False,
+    ) -> dict[str, Any]:
         if amount <= 0:
             raise ValueError("el monto debe ser positivo")
-        # Comprar sin apalancamiento = acción/cripto real; corto o apalancado = CFD.
-        settlement = "real" if is_buy and leverage == 1 else "cfd"
         body: dict[str, Any] = {
             "action": "open",
-            "transaction": "buy" if is_buy else "sell",
+            "transaction": "buy" if is_buy else "sellShort",
             "instrumentId": int(instrument_id),
             "orderType": "mkt",
-            "settlementType": settlement,
+            # Comprar sin apalancamiento = acción/cripto real; corto o apalancado = CFD.
+            "settlementType": "real" if is_buy and leverage == 1 else "cfd",
             "leverage": int(leverage),
             "amount": round(float(amount), 2),
             "orderCurrency": "usd",
@@ -266,10 +289,21 @@ class EtoroClient:
             body["stopLossType"] = "trailing" if trailing else "fixed"
         if take_profit is not None:
             body["takeProfitRate"] = float(take_profit)
-        request_id = request_id or str(uuid.uuid4())
-        data = self.request("POST", PATHS["order"][self.env], body=body, request_id=request_id)
-        data.setdefault("referenceId", request_id)
-        return data
+        return body
+
+    def eligibility(self, instrument_id: int) -> dict:
+        """Cómo se puede operar un instrumento: lados, apalancamientos y si admite stop móvil."""
+        data = self.request("POST", PATHS["eligibility"][self.env], body={"instrumentIds": [int(instrument_id)]})
+        for item in ci_get(data, "eligibilities", default=[]) or []:
+            if ci_get(item, "instrumentId") == int(instrument_id):
+                return item
+        raise LookupError(f"eToro no devolvió la elegibilidad del instrumento {instrument_id}")
+
+    def cost_estimate(self, instrument_id: int, is_buy: bool, amount: float, leverage: int = 1) -> list[dict]:
+        """Costos que eToro cobraría por una orden, sin enviarla (spread, costo nocturno, etc.)."""
+        body = self.order_body(instrument_id, is_buy, amount, leverage)
+        data = self.request("POST", PATHS["costs"][self.env], body=body)
+        return list(ci_get(data, "costs", default=[]) or [])
 
     def order_info(self, order_id: int | None = None, reference_id: str | None = None) -> dict:
         params = {"orderId": order_id} if order_id is not None else {"referenceId": reference_id}
@@ -291,3 +325,19 @@ class EtoroClient:
         path = PATHS["close"][self.env].format(pid=int(position_id))
         key = "InstrumentID" if self.demo else "InstrumentId"
         return self.request("POST", path, body={key: int(instrument_id), "UnitsToDeduct": units})
+
+
+def short_allowed(eligibility: dict, leverage: int = 1) -> bool | None:
+    """¿La elegibilidad permite vender en corto con ese apalancamiento? None si no lo dice."""
+    configs = ci_get(eligibility, "leverageConfigs")
+    if not isinstance(configs, list):
+        return None
+    if ci_get(eligibility, "allowOpenPosition") is False:
+        return False
+    for cfg in configs:
+        if str(ci_get(cfg, "direction", default="")).lower() != "short":
+            continue
+        values = ci_get(cfg, "leverageValues") or []
+        if not values or int(leverage) in values:
+            return True
+    return False

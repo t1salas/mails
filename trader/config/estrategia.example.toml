@@ -24,6 +24,8 @@ intervalo = "OneDay"             # velas diarias: la estrategia está pensada pa
 velas = 1000                     # eToro da como máximo 1000 velas (~4 años en diario)
 capital_papel = 10000            # capital inicial de la cuenta simulada (USD)
 costo_por_lado = 0.0015          # spread + deslizamiento estimado por entrada y por salida (0.15 %)
+costo_anual_cfd = 0.08           # costo anual de mantener un CFD (ventas en corto y apalancadas). Es un supuesto:
+                                 # `verificar-etoro` muestra lo que eToro cobra de verdad; ajústalo con eso
 base_de_datos = "trader.db"      # bitácora (relativa a este archivo)
 vigencia_sugerencias_horas = 24  # después de esto una sugerencia ya no se puede aprobar
 desvio_maximo_precio = 0.015     # al aprobar: si el precio ya corrió más de 1.5 % a favor, no se persigue
@@ -44,7 +46,12 @@ drawdown_maximo = 0.15           # con -15 % desde el máximo el agente se pausa
 detectar_desgaste = true         # se pausa solo si deja de acertar lo que sus probabilidades prometían
 operaciones_min_desgaste = 15    # operaciones cerradas necesarias antes de juzgar el desgaste
 apalancamiento = 1               # 1 = sin apalancamiento (recomendado)
-permitir_cortos = false          # ventas en corto (CFD): apagadas por defecto
+# --- Ganar también a la baja (ventas en corto) ---
+# Apagadas por defecto: en las pruebas no mejoraron el resultado. Antes de encenderlas corre
+# `python -m bot_trader backtest --robustez`: la fila "con ventas en corto" muestra qué pasaría.
+permitir_cortos = false          # true = también vende en corto cuando la tendencia es bajista (son CFDs)
+multiplicador_cortos = 0.5       # un corto arriesga la mitad que una compra (perder en corto no tiene techo)
+max_exposicion_cortos = 0.30     # máximo 30 % del capital vendido en corto a la vez
 monto_minimo = 50                # no abre posiciones más chicas que esto (USD)
 monto_maximo_real = 250          # tope duro por orden en la cuenta real (USD)
 capital_maximo_bot = 0           # 0 = usa todo el capital de la cuenta; p. ej. 2000 = el bot solo usa 2000 USD

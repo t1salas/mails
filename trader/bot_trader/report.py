@@ -122,6 +122,13 @@ def backtest_report(res: BacktestResult, symbols: list[str]) -> str:
         f"  {len(res.trades)} operaciones   ganadoras {res.win_rate:.0%}   factor de ganancia {pf}   "
         f"promedio {res.avg_r:+.2f}R   duración media {res.avg_days:.0f} días",
     ]
+    for label, side in (("Compras", True), ("Ventas en corto", False)):
+        st = res.side_stats(side)
+        if st and res.side_stats(False):  # el desglose solo aporta si hubo cortos
+            lines.append(
+                f"  {label + ':':<17}{st['n']:>3} operaciones  ganadoras {st['win_rate']:.0%}  "
+                f"P&L {st['pnl']:+,.2f}  promedio {st['avg_r']:+.2f}R"
+            )
     if res.would_pause_on:
         lines.append(f"  Ojo: el {res.would_pause_on} el bot en vivo se habría pausado por drawdown.")
     by_symbol: dict[str, list] = {}
@@ -152,6 +159,8 @@ def prediction_lines(res: BacktestResult) -> list[str]:
         f"modelo estadístico {skill('model')}",
         "  (positivo = predice mejor que suponer siempre el promedio; en mercados +1 % a +5 % ya es ventaja)",
     ]
+    if q.get("cortos_n"):
+        lines.append(f"  Por lado: compras {skill('largos')}  |  ventas en corto {skill('cortos')}")
     if q["calibration"]:
         lines.append("  Calibración (lo que predijo vs. lo que pasó):")
         for lo, hi, n, pred, real in q["calibration"]:
@@ -184,6 +193,24 @@ def robustness_report(results: list) -> str:
 
 
 def _verdict(res: BacktestResult) -> str:
+    return _main_verdict(res) + _shorts_note(res)
+
+
+def _shorts_note(res: BacktestResult) -> str:
+    """Si hubo ventas en corto, dice sin rodeos si sumaron o restaron."""
+    shorts = res.side_stats(False)
+    if not shorts:
+        return ""
+    if shorts["pnl"] < 0:
+        return (f"\nOjo: las ventas en corto RESTARON en este periodo ({shorts['n']} operaciones, P&L "
+                f"{shorts['pnl']:+,.2f}). Compara con `permitir_cortos = false` antes de dejarlas encendidas.")
+    if shorts["n"] < 20:
+        return (f"\nLas ventas en corto sumaron ({shorts['pnl']:+,.2f}), pero con solo {shorts['n']} operaciones "
+                "no alcanza para concluir que tienen ventaja.")
+    return f"\nLas ventas en corto sumaron: {shorts['n']} operaciones, P&L {shorts['pnl']:+,.2f}."
+
+
+def _main_verdict(res: BacktestResult) -> str:
     b = res.benchmark_stats
     if len(res.trades) < 20:
         return ("Veredicto: muy pocas operaciones para sacar conclusiones. Agrega activos o más historia "
@@ -192,10 +219,16 @@ def _verdict(res: BacktestResult) -> str:
         return "Veredicto: la estrategia PIERDE en este periodo. No la uses con dinero real con estos parámetros."
     losing_years = sum(1 for _, r in res.yearly if r < 0)
     consistency = f"{len(res.yearly) - losing_years} de {len(res.yearly)} años positivos"
-    if res.calmar >= b.get("calmar", 0) and res.sharpe >= b["sharpe"]:
+    better_risk_adjusted = res.calmar >= b.get("calmar", 0) and res.sharpe >= b["sharpe"]
+    consistent = losing_years * 3 <= len(res.yearly)  # a lo más 1 de cada 3 años en negativo
+    if better_risk_adjusted and consistent:
         return (f"Veredicto: SOSTENIBLE en este periodo: mejor rendimiento por unidad de riesgo que comprar y "
                 f"mantener (Calmar {res.calmar:.2f} vs {b.get('calmar', 0):.2f}), {consistency}. Siguiente paso: "
                 "`--robustez`, luego semanas en DEMO comparando con estos números.")
+    if better_risk_adjusted:
+        return (f"Veredicto: rinde más por unidad de riesgo que comprar y mantener (Calmar {res.calmar:.2f} vs "
+                f"{b.get('calmar', 0):.2f}), pero de forma irregular: solo {consistency}. Todavía no es una "
+                "ganancia constante; mira `--robustez` y más historia antes de confiar.")
     if res.max_dd < b["max_dd"]:
         return (f"Veredicto: gana ({res.cagr:+.1%} anual) con caídas más chicas ({res.max_dd:.1%} vs "
                 f"{b['max_dd']:.1%}), pero rinde menos por unidad de riesgo que comprar y mantener. {consistency}. "

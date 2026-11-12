@@ -30,7 +30,7 @@ from bot_trader.config import Asset, Settings
 from bot_trader.db import Journal, from_iso, iso, now_utc
 from bot_trader.etoro import EtoroClient
 from bot_trader.models import Account, Candle, Headline, NewsView, Position, Regime, Signal
-from bot_trader.risk import Guard, RiskState, TradeContext, check_guards, size_trade
+from bot_trader.risk import Guard, RiskState, TradeContext, bet_correlation, check_guards, size_trade
 from bot_trader.sources import NewsSource, PriceSource, make_price_source
 
 log = logging.getLogger(__name__)
@@ -219,7 +219,10 @@ class Bot:
             out.append(Analysis(asset, signal=signal))
         return out
 
-    def trade_context(self, analyst: Analyst, symbol: str, positions: list[Position], equity: float, peak: float) -> TradeContext:
+    def trade_context(
+        self, analyst: Analyst, sig: Signal, positions: list[Position], equity: float, peak: float
+    ) -> TradeContext:
+        symbol = sig.symbol
         t = len(analyst.feats[symbol]) - 1
         d = analyst.dates[symbol][t]
         correlations = {}
@@ -227,7 +230,7 @@ class Bot:
             if p.symbol != symbol:
                 c = analyst.correlation(symbol, p.symbol, d)
                 if c is not None:
-                    correlations[p.symbol] = c
+                    correlations[p.symbol] = bet_correlation(c, p.is_buy == sig.is_buy)
         return TradeContext(
             drawdown=max(0.0, 1 - equity / peak) if peak > 0 else 0.0,
             regime=analyst.regime_for(symbol, d),
@@ -366,7 +369,12 @@ class Bot:
                     Action("bloqueada", sig.symbol, sig.action, "enfriamiento: se cerró hace poco una posición aquí")
                 )
                 continue
-            ctx = self.trade_context(analyst, sig.symbol, positions, equity, peak)
+            if not sig.is_buy:
+                allowed, why = self._can_short(sig.symbol)
+                if not allowed:
+                    result.actions.append(Action("bloqueada", sig.symbol, sig.action, why))
+                    continue
+            ctx = self.trade_context(analyst, sig, positions, equity, peak)
             size = size_trade(equity, cash, positions, sig, self.s.risk, ctx, real_account=self.broker.real_money)
             if not size.ok:
                 result.actions.append(Action("bloqueada", sig.symbol, sig.action, size.reason))
@@ -397,6 +405,15 @@ class Bot:
         return result
 
     # --- ejecución -----------------------------------------------------------------------
+
+    def _can_short(self, symbol: str) -> tuple[bool, str]:
+        """¿El broker permite vender en corto este activo? (En eToro depende del activo y del país.)"""
+        asset = self.s.asset(symbol)
+        try:
+            iid = self.instrument_id(asset) if asset and isinstance(self.broker, EtoroBroker) else None
+        except Exception as exc:
+            return False, f"no encontré el instrumento en eToro: {exc}"
+        return self.broker.can_short(symbol, iid, self.s.risk.leverage)
 
     def _suggest(self, sig: Signal, amount: float | None, note: str) -> Action:
         existing = self.journal.pending_suggestion(sig.symbol, sig.action)
@@ -496,7 +513,11 @@ class Bot:
         guard = check_guards(equity, peak, day_start, self.risk.paused, self.s.risk)
         if not guard.can_open:
             return f"No se puede abrir: {guard.reason}"
-        ctx = self.trade_context(analyst, asset.symbol, account.positions, equity, peak)
+        if not sig.is_buy:
+            allowed, why = self._can_short(asset.symbol)
+            if not allowed:
+                return f"No se puede abrir: {why}"
+        ctx = self.trade_context(analyst, sig, account.positions, equity, peak)
         size = size_trade(equity, cash, account.positions, sig, self.s.risk, ctx, real_account=self.broker.real_money)
         if not size.ok:
             return f"No se puede abrir: {size.reason}"
@@ -522,7 +543,9 @@ def build_bot(settings: Settings) -> Bot:
     if settings.has_etoro_keys:
         client = EtoroClient(settings.etoro_api_key, settings.etoro_user_key, demo=settings.account != "real")
     if settings.account == "papel":
-        broker: Broker = PaperBroker(journal, settings.paper_capital, settings.cost_per_side)
+        broker: Broker = PaperBroker(
+            journal, settings.paper_capital, settings.cost_per_side, settings.cfd_annual_cost
+        )
     else:
         broker = EtoroBroker(journal, client)
     prices = make_price_source(settings, journal, client)

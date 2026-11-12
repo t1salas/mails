@@ -5,7 +5,7 @@ import pytest
 
 from bot_trader.brokers import EtoroBroker
 from bot_trader.db import Journal
-from bot_trader.etoro import EtoroClient, EtoroError, parse_datetime
+from bot_trader.etoro import EtoroClient, EtoroError, parse_datetime, short_allowed
 from bot_trader.models import Position
 from tests.conftest import START
 
@@ -18,6 +18,13 @@ class FakeEtoro:
         self.positions = []
         self.order_status = 3
         self.fail_429_once = False
+        self.eligibility = {
+            "allowOpenPosition": True, "allowTrailingStopLoss": True,
+            "leverageConfigs": [
+                {"settlementType": "real", "direction": "long", "leverageValues": [1]},
+                {"settlementType": "cfd", "direction": "short", "leverageValues": [1, 2]},
+            ],
+        }
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -52,6 +59,16 @@ class FakeEtoro:
                 "positionExecutions": [{"positionId": 777, "investedAmountCurrency": 200,
                                         "openingData": {"avgPrice": 150.0, "units": 1.3333}}],
             })
+        if path.endswith("/eligibility"):
+            iid = json.loads(request.content)["instrumentIds"][0]
+            if self.eligibility is None:
+                return httpx.Response(500, json={"title": "caído"})
+            return httpx.Response(200, json={"currency": "USD", "eligibilities": [{"instrumentId": iid, **self.eligibility}]})
+        if path.endswith("/costs"):
+            return httpx.Response(200, json={"instrumentId": 1001, "costs": [
+                {"costType": "marketSpread", "amount": 1.5, "currency": "USD"},
+                {"costType": "overnightFee", "amount": 0.21, "currency": "USD"},
+            ]})
         if "market-close-orders/positions/" in path:
             return httpx.Response(200, json={"token": "c", "orderForClose": {"positionID": 777}})
         return httpx.Response(404, json={"errorMessage": f"no existe {path}"})
@@ -102,10 +119,13 @@ def test_open_order_body_demo_vs_real(fake):
     assert body["stopLossType"] == "trailing" and "takeProfitRate" not in body
     assert req.headers["x-request-id"] == "ref-1"
     real = client(fake, demo=False)
-    real.open_market_order(1001, False, 100, 2)
+    real.open_market_order(1001, False, 100, 1, stop_loss=160.0, trailing=True)
     req = fake.requests[-1]
     assert req.url.path == "/api/v2/trading/execution/orders"
-    assert json.loads(req.content)["settlementType"] == "cfd"
+    body = json.loads(req.content)
+    # Vender en corto es un CFD, aunque sea sin apalancamiento
+    assert body["transaction"] == "sellShort" and body["settlementType"] == "cfd" and body["leverage"] == 1
+    assert body["stopLossRate"] == 160.0 and body["stopLossType"] == "trailing"
 
 
 def test_close_body_casing(fake):
@@ -162,3 +182,38 @@ def test_broker_rejected_and_close(fake, tmp_path):
     exit_ = broker.close(p, 155.0, "prueba")
     assert exit_.pnl == pytest.approx(6.5)
     assert journal.open_positions() == []
+
+
+def test_eligibility_and_short_allowed(fake):
+    c = client(fake)
+    elig = c.eligibility(1001)
+    assert fake.requests[-1].url.path == "/api/v2/trading/info/demo/eligibility"
+    assert json.loads(fake.requests[-1].content) == {"instrumentIds": [1001]}
+    assert short_allowed(elig, 1) is True and short_allowed(elig, 5) is False
+    only_long = {"leverageConfigs": [{"settlementType": "real", "direction": "long", "leverageValues": [1]}]}
+    assert short_allowed(only_long) is False
+    assert short_allowed({}) is None  # eToro no lo informó
+    costs = c.cost_estimate(1001, False, 1000)
+    assert fake.requests[-1].url.path == "/api/v2/trading/info/demo/costs"
+    assert json.loads(fake.requests[-1].content)["transaction"] == "sellShort"
+    assert {x["costType"] for x in costs} == {"marketSpread", "overnightFee"}
+
+
+def test_broker_can_short(fake, tmp_path):
+    broker = EtoroBroker(Journal(tmp_path / "b.db", "demo"), client(fake))
+    assert broker.can_short("AAPL", 1001) == (True, "")
+    fake.eligibility = {"leverageConfigs": [{"settlementType": "real", "direction": "long", "leverageValues": [1]}]}
+    ok, why = EtoroBroker(Journal(tmp_path / "c.db", "demo"), client(fake)).can_short("AAPL", 1001)
+    assert not ok and "no permite vender en corto" in why
+    # Si eToro no responde la consulta, no se bloquea: decide eToro al recibir la orden
+    fake.eligibility = None
+    assert EtoroBroker(Journal(tmp_path / "d.db", "demo"), client(fake)).can_short("AAPL", 1001)[0]
+
+
+def test_broker_falls_back_to_fixed_stop_when_trailing_not_allowed(fake, tmp_path):
+    fake.eligibility = {"allowTrailingStopLoss": False, "leverageConfigs": []}
+    broker = EtoroBroker(Journal(tmp_path / "b.db", "demo"), client(fake))
+    fill = broker.open("AAPL", 1001, True, 200, 1, 150, 140, None, trailing=True)
+    order = next(r for r in fake.requests if r.url.path.endswith("/orders") and r.method == "POST")
+    assert json.loads(order.content)["stopLossType"] == "fixed"
+    assert fill.ok and not fill.position.trailing and "stop fijo" in fill.message
