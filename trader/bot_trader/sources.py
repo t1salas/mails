@@ -19,7 +19,12 @@ from bot_trader.etoro import EtoroClient, parse_datetime
 from bot_trader.models import Candle, Headline
 
 log = logging.getLogger(__name__)
-BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130 Safari/537.36"
+# Yahoo responde 429 a clientes que no parecen un navegador común (comprobado desde un VPS:
+# el User-Agent por defecto de httpx da 429 y el de Chrome en Windows da 200).
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
 MAX_FEED_BYTES = 2_000_000
 
 

@@ -61,3 +61,11 @@ def test_csv_prices(tmp_path):
     assert bars[0].volume == 0.0
     with pytest.raises(FileNotFoundError):
         CsvPrices(tmp_path).candles(Asset("MSFT"))
+
+
+def test_default_clients_identify_as_a_browser():
+    from bot_trader.sources import BROWSER_UA, NewsSource
+
+    assert "Windows NT" in BROWSER_UA and "Chrome/" in BROWSER_UA
+    assert YahooPrices().http.headers["User-Agent"] == BROWSER_UA  # sin esto Yahoo responde 429
+    assert NewsSource().http.headers["User-Agent"] == BROWSER_UA
