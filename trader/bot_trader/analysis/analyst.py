@@ -215,6 +215,23 @@ class Analyst:
             return None
         return self._corr(self.returns[a], self.dates[a], self.returns[b], d, window)
 
+    def core_weight(self, symbol: str, d: date) -> float | None:
+        """Paridad de riesgo: cada activo recibe capital en proporción inversa a su volatilidad.
+
+        Los pesos suman `max_exposicion_total` entre todos los activos de la lista (estén o no
+        en tendencia), así que fuera de tendencia la diferencia se queda en efectivo.
+        """
+        inv = {}
+        for sym in self.feats:
+            k = bisect_right(self.dates[sym], d) - 1
+            vol = self.annual_vol(sym, k) if k >= 0 else None
+            if vol:
+                inv[sym] = 1 / vol
+        if symbol not in inv:
+            return None
+        total = sum(inv.values())
+        return self.s.risk.max_total_exposure * inv[symbol] / total
+
     def annual_vol(self, symbol: str, t: int) -> float | None:
         v = self.feats[symbol].vol[t]
         return v * math.sqrt(252) if v is not None else None

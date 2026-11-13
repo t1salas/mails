@@ -89,6 +89,27 @@ Pruebas automáticas: `python -m pytest`.
 - **Calidad de las predicciones:** mejora sobre la tasa base y tabla de calibración.
 - **`--robustez`:** repite todo con stops, umbrales, medias y costos distintos. Si la mayoría de variantes pierde, la estrategia está sobreajustada al pasado: no la uses.
 
+## Elegir la estrategia con tus datos
+
+`python -m bot_trader backtest --variantes` corre cinco versiones sobre los mismos precios y las compara con comprar y mantener y con el dinero sin riesgo (`rendimiento_sin_riesgo`, 4 % por defecto):
+
+| Versión | Cómo se activa en `config/estrategia.toml` |
+|---|---|
+| Agente (configuración actual) | `tipo = "agente"` |
+| Agente sin filtro de probabilidad | `usar_probabilidad = false` |
+| Agente con el doble de riesgo | `riesgo_por_operacion` al doble |
+| Agente sin filtro y doble riesgo | las dos anteriores |
+| Núcleo: media de 200 días | `tipo = "nucleo"` |
+
+El **núcleo** es la versión más simple:
+- mantiene cada activo mientras esté sobre su media de 200 días y lo vende cuando cae 2 % debajo;
+- reparte el capital según la volatilidad: lo más volátil recibe menos;
+- tiene un stop de protección fijo a 20 %.
+
+No intenta adivinar: solo evita quedarse dentro de las caídas largas. Opera poco y casi no tiene parámetros que ajustar.
+
+El reporte dice cuál rinde mejor por unidad de riesgo y si alguna supera al dinero sin riesgo. Ojo: elegir la mejor de varias versiones con el mismo pasado siempre sobreestima lo que dará en el futuro.
+
 ## Ganar también a la baja (ventas en corto)
 
 En eToro no solo se gana cuando el precio sube: también se puede **vender en corto** y ganar cuando baja. El agente sabe hacerlo, pero viene **apagado** (`permitir_cortos = false`), porque en las pruebas no mejoró el resultado.

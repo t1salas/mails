@@ -409,6 +409,7 @@ def run_backtest(
                 regime=analyst.regime_for(sig.symbol, d),
                 annual_vol=analyst.annual_vol(sig.symbol, t),
                 correlations=correlations,
+                target_weight=analyst.core_weight(sig.symbol, d) if sp.kind == "nucleo" else None,
             )
             size = size_trade(equity, cash - reserved, open_now, sig, rp, ctx, False)
             if not size.ok:
@@ -476,5 +477,37 @@ def robustness(
     for label, change in variants:
         variant = deepcopy(settings)
         change(variant)
+        out.append((label, run_backtest(variant, data, reference=reference)))
+    return out
+
+
+def compare_variants(
+    settings: Settings, data: dict[str, list[Candle]], reference: list[Candle] | None = None
+) -> list[tuple[str, BacktestResult]]:
+    """Las versiones de la estrategia que vale la pena comparar, sobre los mismos datos."""
+
+    def no_probability(s: Settings) -> None:
+        s.risk.use_probability = False
+
+    def double_risk(s: Settings) -> None:
+        s.risk.risk_per_trade = min(s.risk.risk_per_trade * 2, 0.05)
+
+    def core(s: Settings) -> None:
+        s.strategy.kind = "nucleo"
+        s.risk.allow_short = False
+
+    variants = [
+        ("agente (configuración actual)", []),
+        ("agente sin filtro de probabilidad", [no_probability]),
+        ("agente con el doble de riesgo", [double_risk]),
+        ("agente sin filtro y doble riesgo", [no_probability, double_risk]),
+        ("núcleo: media de 200 días", [core]),
+    ]
+    out = []
+    for label, changes in variants:
+        variant = deepcopy(settings)
+        variant.strategy.kind = "agente"
+        for change in changes:
+            change(variant)
         out.append((label, run_backtest(variant, data, reference=reference)))
     return out

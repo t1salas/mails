@@ -312,3 +312,15 @@ def test_backtest_with_shorts_reports_each_side(settings):
     results = robustness(settings, small)
     assert "con ventas en corto" in [label for label, _ in results]
     assert "Robustez" in robustness_report(results)
+
+
+def test_core_mode_opens_with_volatility_weight(settings, data):
+    settings.mode = "autonomo"
+    settings.strategy.kind = "nucleo"
+    bot = make_bot(settings, data)
+    r = bot.run_cycle()
+    opened = [a for a in r.actions if a.kind == "ejecutada"]
+    assert [a.symbol for a in opened] == ["UP"]  # DOWN está bajo su media
+    assert "según su volatilidad" in opened[0].detail
+    p = bot.journal.open_positions()[0]
+    assert not p.trailing and p.stop == pytest.approx(data["UP"][-1].close * 0.8, rel=0.01)

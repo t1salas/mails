@@ -86,10 +86,17 @@ class RiskParams:
     defensive_mult: float = 0.5  # multiplicador de riesgo con mercado bajista
     decay_check: bool = True  # pausar si el modelo deja de acertar lo que promete
     decay_min_trades: int = 15
+    use_probability: bool = True  # False = entra por tendencia sin exigir probabilidad ni Kelly
 
 
 @dataclass
 class StrategyParams:
+    # agente = tendencia + probabilidades + stop móvil (activo, busca entradas con ventaja)
+    # nucleo = sencillo: mantiene cada activo mientras esté sobre su media de 200 días y
+    #          reparte el capital según la volatilidad (lo más volátil recibe menos)
+    kind: str = "agente"
+    core_exit_margin: float = 0.02  # núcleo: sale si el cierre cae 2 % bajo la media (evita entrar y salir por ruido)
+    core_stop: float = 0.20  # núcleo: stop de protección fijo a 20 % bajo la entrada (por si hay un desplome)
     fast_sma: int = 50
     slow_sma: int = 200
     rsi_period: int = 14
@@ -128,6 +135,7 @@ class Settings:
     paper_capital: float = 10_000.0
     cost_per_side: float = 0.0015
     cfd_annual_cost: float = 0.08  # costo anual de mantener un CFD (cortos y apalancadas); supuesto a verificar
+    cash_rate: float = 0.04  # lo que rinde el dinero sin riesgo (ahorro, bonos de corto plazo): la vara mínima
     db_path: str = "trader.db"
     suggestion_ttl_hours: float = 24.0
     max_price_drift: float = 0.015  # al aprobar una sugerencia, cuánto se pudo mover el precio
@@ -195,6 +203,12 @@ class Settings:
                               "superar max_exposicion_total")
         if not 0 <= self.cfd_annual_cost <= 0.5:
             raise ConfigError("costo_anual_cfd debe estar entre 0 y 0.5 (50 % anual)")
+        if s.kind not in ("agente", "nucleo"):
+            raise ConfigError('tipo debe ser "agente" o "nucleo"')
+        if not 0 <= s.core_exit_margin < 0.2 or not 0.05 <= s.core_stop <= 0.5:
+            raise ConfigError("margen_salida_nucleo debe estar entre 0 y 0.2, y stop_nucleo entre 0.05 y 0.5")
+        if s.kind == "nucleo" and r.allow_short:
+            raise ConfigError("el tipo nucleo solo compra: pon permitir_cortos = false")
         if s.exit_style not in ("seguimiento", "objetivo"):
             raise ConfigError('estilo_salida debe ser "seguimiento" u "objetivo"')
         if not -1 <= self.decision_hour_utc <= 23:
@@ -227,6 +241,7 @@ _GENERAL = {
     "capital_papel": "paper_capital",
     "costo_por_lado": "cost_per_side",
     "costo_anual_cfd": "cfd_annual_cost",
+    "rendimiento_sin_riesgo": "cash_rate",
     "base_de_datos": "db_path",
     "vigencia_sugerencias_horas": "suggestion_ttl_hours",
     "desvio_maximo_precio": "max_price_drift",
@@ -259,8 +274,12 @@ _RISK = {
     "multiplicador_defensivo": "defensive_mult",
     "detectar_desgaste": "decay_check",
     "operaciones_min_desgaste": "decay_min_trades",
+    "usar_probabilidad": "use_probability",
 }
 _STRATEGY = {
+    "tipo": "kind",
+    "margen_salida_nucleo": "core_exit_margin",
+    "stop_nucleo": "core_stop",
     "estilo_salida": "exit_style",
     "desacuerdo_maximo": "max_disagreement",
     "media_rapida": "fast_sma",

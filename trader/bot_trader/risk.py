@@ -131,6 +131,7 @@ class TradeContext:
     # Correlación "de apuesta" con cada posición abierta: ya trae el signo según el lado.
     # Comprar QQQ teniendo SPY comprado es duplicar (+0.9); venderlo en corto es cubrirse (-0.9).
     correlations: dict[str, float] = field(default_factory=dict)
+    target_weight: float | None = None  # núcleo: fracción del capital que le toca a este activo
 
 
 def bet_correlation(corr: float, same_side: bool) -> float:
@@ -164,7 +165,7 @@ def risk_budget(
         if corr >= params.high_correlation:
             risk *= 0.5
             notes.append(f"riesgo a la mitad: correlación {corr:.2f} con {symbol}")
-    if params.kelly_fraction > 0 and prob is not None:
+    if params.kelly_fraction > 0 and params.use_probability and prob is not None:
         kelly = prob.kelly
         if kelly <= 0:
             return 0.0, ["la ventaja estimada no alcanza para arriesgar (Kelly <= 0)"]
@@ -185,6 +186,8 @@ def size_trade(
     real_account: bool,
 ) -> SizeDecision:
     """Tamaño de una entrada con todos los ajustes del perfil sostenible."""
+    if ctx.target_weight is not None:
+        return size_core(equity, cash, positions, sig, params, ctx, real_account)
     risk, notes = risk_budget(params, ctx, sig.probability, sig.is_buy)
     if risk <= 0:
         return SizeDecision(False, reason="; ".join(notes) or "sin presupuesto de riesgo")
@@ -203,6 +206,36 @@ def size_trade(
     if decision.ok and notes:
         decision.reason += "; " + "; ".join(notes)
     return decision
+
+
+def size_core(
+    equity: float,
+    cash: float,
+    positions: list[Position],
+    sig: Signal,
+    params: RiskParams,
+    ctx: TradeContext,
+    real_account: bool,
+) -> SizeDecision:
+    """Núcleo: el monto sale del reparto por volatilidad, no de la distancia al stop."""
+    if any(p.symbol == sig.symbol for p in positions):
+        return SizeDecision(False, reason=f"ya hay una posición abierta en {sig.symbol}")
+    weight = min(ctx.target_weight or 0.0, params.max_asset_exposure)
+    lev = params.leverage
+    used = sum(p.exposure for p in positions)
+    limits = [
+        (weight * equity / lev, "reparto por volatilidad"),
+        (max(params.max_total_exposure * equity - used, 0.0) / lev, "exposición total"),
+        (max(cash, 0.0), "efectivo disponible"),
+    ]
+    if real_account:
+        limits.append((params.max_order_real, "tope por orden en cuenta real"))
+    amount, binding = min(limits, key=lambda x: x[0])
+    amount = round(amount, 2)
+    if amount < params.min_order:
+        return SizeDecision(False, reason=f"el monto ({amount:,.2f}) queda bajo el mínimo ({params.min_order:,.2f}) por {binding}")
+    note = "" if binding == "reparto por volatilidad" else f" (limitado por {binding})"
+    return SizeDecision(True, amount, f"{weight:.1%} del capital según su volatilidad{note}")
 
 
 class RiskState:

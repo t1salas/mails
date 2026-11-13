@@ -236,6 +236,7 @@ class Bot:
             regime=analyst.regime_for(symbol, d),
             annual_vol=analyst.annual_vol(symbol, t),
             correlations=correlations,
+            target_weight=analyst.core_weight(symbol, d) if self.s.strategy.kind == "nucleo" else None,
         )
 
     @staticmethod

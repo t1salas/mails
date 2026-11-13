@@ -151,7 +151,7 @@ def cycle_report(r: CycleResult, detailed: bool = True) -> str:
     return "\n".join(out)
 
 
-def backtest_report(res: BacktestResult, symbols: list[str]) -> str:
+def backtest_report(res: BacktestResult, symbols: list[str], cash_rate: float = 0.04) -> str:
     if res.start is None:
         return "No hay datos suficientes para el backtest (hacen falta ~400 velas por activo)."
     pf = "∞" if res.profit_factor == float("inf") else f"{res.profit_factor:.2f}"
@@ -195,7 +195,7 @@ def backtest_report(res: BacktestResult, symbols: list[str]) -> str:
             f"  {sym:<8} {len(trades):>3} operaciones  ganadoras {wins / len(trades):.0%}  "
             f"P&L {sum(t.pnl for t in trades):+,.2f}  promedio {sum(t.r for t in trades) / len(trades):+.2f}R"
         )
-    lines += ["", *prediction_lines(res), "", _verdict(res)]
+    lines += ["", *prediction_lines(res), "", _verdict(res, cash_rate)]
     return "\n".join(lines)
 
 
@@ -224,7 +224,7 @@ def prediction_lines(res: BacktestResult) -> list[str]:
     return lines
 
 
-def robustness_report(results: list) -> str:
+def robustness_report(results: list, cash_rate: float = 0.04) -> str:
     lines = ["== Robustez: ¿sigue funcionando si cambian un poco los parámetros? ==",
              f"  {'variante':<26}{'anual':>8}{'caída':>8}{'Calmar':>8}{'Sharpe':>8}{'operac.':>9}"]
     calmars = []
@@ -236,8 +236,12 @@ def robustness_report(results: list) -> str:
         lines.append(f"  {label:<26}{r.cagr:>+8.1%}{r.max_dd:>8.1%}{r.calmar:>8.2f}{r.sharpe:>8.2f}{len(r.trades):>9}")
     if calmars:
         bad = sum(1 for c in calmars if c <= 0)
+        cagrs = [r.cagr for _, r in results if r.start is not None]
         lines.append("")
-        if bad == 0:
+        if bad == 0 and max(cagrs) < cash_rate:
+            lines.append(f"Veredicto: estable pero POBRE. Todas ganan, pero ninguna supera el dinero sin riesgo "
+                         f"({cash_rate:.1%} anual): no hay ventaja que justifique operar.")
+        elif bad == 0:
             lines.append("Veredicto: robusta. Todas las variantes ganan; la ventaja no depende de números exactos.")
         elif bad <= len(calmars) // 3:
             lines.append(f"Veredicto: aceptable. {bad} de {len(calmars)} variantes pierden; revisa cuáles.")
@@ -247,8 +251,12 @@ def robustness_report(results: list) -> str:
     return "\n".join(lines)
 
 
-def _verdict(res: BacktestResult) -> str:
-    return _main_verdict(res) + _shorts_note(res)
+def _verdict(res: BacktestResult, cash_rate: float = 0.04) -> str:
+    verdict = _main_verdict(res)
+    if res.trades and res.cagr < cash_rate and not verdict.startswith("Veredicto: la estrategia PIERDE"):
+        verdict += (f"\nPero rinde menos que el dinero sin riesgo ({res.cagr:+.1%} contra {cash_rate:.1%} anual): "
+                    "así no compensa el riesgo de operar.")
+    return verdict + _shorts_note(res)
 
 
 def _shorts_note(res: BacktestResult) -> str:
@@ -290,3 +298,43 @@ def _main_verdict(res: BacktestResult) -> str:
                 "Decide si ese intercambio te conviene.")
     return ("Veredicto: gana, pero comprar y mantener fue mejor y con caídas parecidas o menores. "
             "Para estos activos, invertir y esperar fue la opción más sostenible.")
+
+
+def variants_report(results: list, cash_rate: float) -> str:
+    """Tabla comparativa y cuál conviene, con la vara mínima de no hacer nada."""
+    rows = [(label, r) for label, r in results if r.start is not None]
+    if not rows:
+        return "No hay datos suficientes para comparar variantes."
+    first = rows[0][1]
+    b = first.benchmark_stats
+    lines = [
+        f"== Variantes | {first.start} a {first.end} ({first.years:.1f} años) ==",
+        f"  {'versión':<36}{'anual':>8}{'caída':>8}{'Sharpe':>8}{'Calmar':>8}{'años +':>8}{'operac.':>9}",
+    ]
+    for label, r in rows:
+        pos = sum(1 for _, y in r.yearly if y > 0)
+        lines.append(
+            f"  {label:<36}{r.cagr:>+8.1%}{r.max_dd:>8.1%}{r.sharpe:>8.2f}{r.calmar:>8.2f}"
+            f"{f'{pos}/{len(r.yearly)}':>8}{len(r.trades):>9}"
+        )
+    lines.append(f"  {'comprar y mantener (referencia)':<36}{b['cagr']:>+8.1%}{b['max_dd']:>8.1%}{b['sharpe']:>8.2f}"
+                 f"{b.get('calmar', 0):>8.2f}")
+    lines.append(f"  {'dinero sin riesgo (referencia)':<36}{cash_rate:>+8.1%}{0.0:>8.1%}")
+    lines.append("")
+    worth = [(label, r) for label, r in rows if r.cagr > cash_rate and len(r.trades) >= 10]
+    if not worth:
+        lines.append(f"Veredicto: ninguna versión rinde más que el dinero sin riesgo ({cash_rate:.1%} anual). "
+                     "Con estos activos y este periodo, no conviene operar con dinero real.")
+        return "\n".join(lines)
+    best_label, best = max(worth, key=lambda x: (x[1].calmar, x[1].sharpe))
+    lines.append(f"Mejor por rendimiento ajustado al riesgo: {best_label} ({best.cagr:+.1%} anual, peor caída "
+                 f"{best.max_dd:.1%}, Calmar {best.calmar:.2f}).")
+    if best.sharpe >= b["sharpe"] and best.calmar >= b.get("calmar", 0):
+        lines.append("Supera a comprar y mantener por unidad de riesgo: es candidata para la demo.")
+    elif best.max_dd < b["max_dd"]:
+        lines.append(f"Rinde menos que comprar y mantener ({b['cagr']:+.1%}), pero con caídas mucho menores "
+                     f"({best.max_dd:.1%} vs {b['max_dd']:.1%}). Elige según cuánto te importe no ver caídas grandes.")
+    else:
+        lines.append("Comprar y mantener fue mejor en todo; el agente no aporta en este periodo.")
+    lines.append("Ojo: elegir la mejor de varias versiones con el mismo pasado sobreestima lo que dará en el futuro.")
+    return "\n".join(lines)

@@ -59,6 +59,8 @@ def evaluate(
     risk: RiskParams,
     regime: Regime | None = None,
 ) -> Signal:
+    if strategy.kind == "nucleo":
+        return evaluate_core(symbol, feats, t, news, position, strategy)
     price = feats.close[t]
     tech = feats.score[t]
     atr = feats.atr[t]
@@ -133,7 +135,9 @@ def evaluate(
         sig.probability = prob
         sig.stop, sig.target = trade_levels(price, atr, is_buy, strategy)
         blockers = []
-        if prob is None:
+        if not risk.use_probability:
+            pass  # modo "sin filtro de probabilidad": manda la tendencia; la probabilidad solo se informa
+        elif prob is None:
             blockers.append("sin historia suficiente para estimar probabilidades")
         else:
             if prob.p_win < risk.min_probability:
@@ -171,7 +175,7 @@ def evaluate(
         )
         sig.reasons = (
             [f"tendencia {sig.trend} (técnico {tech:+.2f}, noticias {news_score:+.2f}, combinado {combined:+.2f})"]
-            + _probability_reasons(prob, trailing)
+            + (_probability_reasons(prob, trailing) if prob is not None else [])
             + [exit_text]
             + context
         )
@@ -180,4 +184,56 @@ def evaluate(
         return sig
 
     sig.reasons = [f"sin ventaja clara: puntaje {combined:+.2f} (entrada desde {strategy.entry_score:+.2f})"] + context
+    return sig
+
+
+def evaluate_core(
+    symbol: str,
+    feats: Features,
+    t: int,
+    news: NewsView | None,
+    position: Position | None,
+    strategy: StrategyParams,
+) -> Signal:
+    """Núcleo: estar dentro mientras el precio esté sobre su media de 200 días.
+
+    Es el filtro de tendencia más estudiado: no busca adivinar, solo evita quedarse dentro
+    durante las caídas largas. Sale con un margen bajo la media para no entrar y salir por ruido.
+    Las noticias solo pueden vetar una entrada (evento de riesgo negativo), nunca forzarla.
+    """
+    price = feats.close[t]
+    sma = feats.sma_slow[t]
+    if sma is None:
+        return Signal(
+            symbol=symbol,
+            action="MANTENER" if position else "ESPERAR",
+            price=price,
+            reasons=[f"datos insuficientes: hacen falta {strategy.slow_sma} velas para la media"],
+            news=news,
+        )
+    gap = price / sma - 1
+    above = f"precio {gap:+.1%} respecto a su media de {strategy.slow_sma} días ({sma:,.2f})"
+    sig = Signal(symbol=symbol, action="ESPERAR", price=price, trend="alcista" if gap > 0 else "bajista",
+                 tech_score=round(gap, 3), combined=round(gap, 3), news=news, atr=feats.atr[t], rsi=feats.rsi[t])
+    if position is not None:
+        sig.is_buy, sig.stop, sig.target = True, position.stop, position.target
+        if price < sma * (1 - strategy.core_exit_margin):
+            sig.action = "CERRAR"
+            sig.reasons = [f"el precio cayó bajo su media de {strategy.slow_sma} días: {above}"]
+        else:
+            sig.action = "MANTENER"
+            sig.reasons = [f"sigue en tendencia: {above}"]
+        return sig
+    if gap <= 0:
+        sig.reasons = [f"fuera de tendencia: {above}"]
+        return sig
+    if news and news.risk_event and news.score < 0:
+        sig.reasons = [f"en tendencia, pero hay un evento de riesgo en las noticias: {news.summary}"]
+        return sig
+    sig.action = "COMPRAR"
+    sig.stop = price * (1 - strategy.core_stop)
+    sig.reasons = [
+        f"en tendencia: {above}",
+        f"se mantiene mientras siga sobre la media; stop de protección a {strategy.core_stop:.0%} ({sig.stop:,.2f})",
+    ]
     return sig

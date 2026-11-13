@@ -25,7 +25,7 @@ import os
 import sys
 import time
 
-from bot_trader.backtest import robustness, run_backtest
+from bot_trader.backtest import compare_variants, robustness, run_backtest
 from bot_trader.config import ConfigError, Settings, load_settings
 from bot_trader.engine import build_bot
 from bot_trader.etoro import EtoroClient, EtoroError, ci_get, short_allowed
@@ -39,6 +39,7 @@ from bot_trader.report import (
     journal_text,
     robustness_report,
     status_text,
+    variants_report,
 )
 from bot_trader.remote import make_remote
 
@@ -170,11 +171,15 @@ def cmd_backtest(args) -> int:
     candles, errors, reference = bot.fetch_market()
     for sym, err in errors.items():
         print(f"{sym}: {err}")
+    if args.variantes:
+        print("Comparando 5 versiones de la estrategia (tarda un par de minutos)...", flush=True)
+        print(variants_report(compare_variants(settings, candles, reference), settings.cash_rate))
+        return 0
     res = run_backtest(settings, candles, initial=args.capital, reference=reference)
-    print(backtest_report(res, sorted(candles)))
+    print(backtest_report(res, sorted(candles), settings.cash_rate))
     if args.robustez:
-        print()
-        print(robustness_report(robustness(settings, candles, reference)))
+        print("\nCalculando la robustez (8 backtests más, tarda un par de minutos)...", flush=True)
+        print(robustness_report(robustness(settings, candles, reference), settings.cash_rate))
     return 0
 
 
@@ -299,6 +304,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--simbolos", help="solo estos símbolos, separados por coma")
     p.add_argument("--capital", type=float, default=None)
     p.add_argument("--robustez", action="store_true", help="repite con variaciones de parámetros")
+    p.add_argument("--variantes", action="store_true", help="compara las versiones de la estrategia")
     p.set_defaults(fn=cmd_backtest)
     sub.add_parser("verificar-etoro").set_defaults(fn=cmd_verificar)
     sub.add_parser("probar-telegram").set_defaults(fn=cmd_probar_telegram)

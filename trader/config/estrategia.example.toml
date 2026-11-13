@@ -24,6 +24,7 @@ intervalo = "OneDay"             # velas diarias: la estrategia está pensada pa
 velas = 1000                     # eToro da como máximo 1000 velas (~4 años en diario)
 capital_papel = 10000            # capital inicial de la cuenta simulada (USD)
 costo_por_lado = 0.0015          # spread + deslizamiento estimado por entrada y por salida (0.15 %)
+rendimiento_sin_riesgo = 0.04    # lo que rinde el dinero sin riesgo (ahorro, bonos cortos): la vara mínima
 costo_anual_cfd = 0.08           # costo anual de mantener un CFD (ventas en corto y apalancadas). Es un supuesto:
                                  # `verificar-etoro` muestra lo que eToro cobra de verdad; ajústalo con eso
 base_de_datos = "trader.db"      # bitácora (relativa a este archivo)
@@ -55,12 +56,20 @@ max_exposicion_cortos = 0.30     # máximo 30 % del capital vendido en corto a l
 monto_minimo = 50                # no abre posiciones más chicas que esto (USD)
 monto_maximo_real = 250          # tope duro por orden en la cuenta real (USD)
 capital_maximo_bot = 0           # 0 = usa todo el capital de la cuenta; p. ej. 2000 = el bot solo usa 2000 USD
+usar_probabilidad = true         # false = el agente entra por tendencia sin exigir probabilidad ni Kelly
 probabilidad_minima = 0.35       # con stop móvil se gana menos veces pero más: manda la expectativa
 expectativa_minima = 0.10        # ganancia esperada mínima, en R (1R = lo arriesgado), ya con costos
 muestras_minimas = 30            # casos históricos parecidos mínimos para creerle a la estadística
 enfriamiento_horas = 24          # no reentrar a un activo hasta pasadas estas horas desde el cierre
 
 [estrategia]
+# Qué estrategia usa (compáralas con `python -m bot_trader backtest --variantes`):
+#   agente = tendencia + probabilidades + stop móvil: busca entradas con ventaja
+#   nucleo = sencillo: mantiene cada activo mientras esté sobre su media de 200 días y reparte el
+#            capital según la volatilidad (lo más volátil recibe menos). Opera poco y casi no se ajusta.
+tipo = "agente"
+margen_salida_nucleo = 0.02      # núcleo: sale si cierra 2 % bajo la media (evita entrar y salir por ruido)
+stop_nucleo = 0.20               # núcleo: stop de protección fijo a 20 % bajo la entrada
 estilo_salida = "seguimiento"    # seguimiento = stop móvil que deja correr ganancias | objetivo = stop y objetivo fijos
 stop_atr = 3.0                   # distancia del stop: 3 veces el movimiento diario típico (ATR)
 objetivo_atr = 6.0               # solo con estilo_salida = "objetivo"
