@@ -34,6 +34,7 @@ from bot_trader.risk import Guard, RiskState, TradeContext, bet_correlation, che
 from bot_trader.sources import NewsSource, PriceSource, make_price_source
 
 log = logging.getLogger(__name__)
+PENDING_WINDOW = timedelta(days=4)  # órdenes pendientes que todavía se esperan
 
 
 @dataclass
@@ -344,23 +345,45 @@ class Bot:
             sig = a.signal
             if sig is None or sig.action != "CERRAR":
                 continue
-            position = next(p for p in positions if p.symbol == sig.symbol)
+            held = [p for p in positions if p.symbol == sig.symbol]
             reason = "; ".join(sig.reasons[:2])
             if self.s.mode == "autonomo":
-                exit_ = self._close(position, sig.price, reason)
-                if exit_ is not None:
-                    result.exits.append(exit_)
-                    positions.remove(position)
-                    cash += position.amount + (exit_.pnl or 0)
-                else:
-                    result.actions.append(Action("fallida", sig.symbol, "CERRAR", "no se pudo cerrar; ver log"))
+                for position in held:  # si por error hay varias del mismo activo, se cierran todas
+                    exit_ = self._close(position, sig.price, reason)
+                    if exit_ is not None:
+                        result.exits.append(exit_)
+                        positions.remove(position)
+                        cash += position.amount + (exit_.pnl or 0)
+                    else:
+                        result.actions.append(Action("fallida", sig.symbol, "CERRAR", "no se pudo cerrar; ver log"))
             else:
                 result.actions.append(self._suggest(sig, None, reason))
 
         # 5. Entradas, la de mayor ganancia esperada primero
         entries = [a.signal for a in result.analyses if a.signal and a.signal.opens_position]
         entries.sort(key=lambda s: s.probability.expectancy_r if s.probability else 0, reverse=True)
+        # Órdenes enviadas que eToro todavía no ejecuta (p. ej. con el mercado cerrado): cuentan como
+        # posiciones, para no volver a comprar lo mismo ni gastar dos veces el mismo dinero.
+        pending = self.journal.pending_open_orders(newer_than=now - PENDING_WINDOW)
+        pending_symbols = {o["simbolo"] for o in pending}
+        for o in pending:
+            if not any(p.symbol == o["simbolo"] for p in positions):
+                cash -= o["monto"] or 0
+                positions.append(Position(id=f"pendiente-{o['id']}", symbol=o["simbolo"], is_buy=True,
+                                          amount=o["monto"] or 0, units=0, entry_price=0, stop=None,
+                                          target=None, opened_at=now))
+        stale = self._stale_symbols(candles)
         for sig in entries:
+            if sig.symbol in pending_symbols:
+                result.actions.append(Action(
+                    "bloqueada", sig.symbol, sig.action,
+                    "ya hay una orden pendiente en eToro para este activo (se ejecuta al abrir el mercado)"))
+                continue
+            if sig.symbol in stale:
+                result.actions.append(Action(
+                    "bloqueada", sig.symbol, sig.action,
+                    "no hay precio nuevo desde la última decisión (mercado cerrado): se decide con la próxima vela"))
+                continue
             if not guard.can_open:
                 result.actions.append(Action("bloqueada", sig.symbol, sig.action, guard.reason))
                 continue
@@ -395,8 +418,17 @@ class Bot:
                 )
 
         self.journal.set("ultima_decision", now.date().isoformat())
+        for sym, bars in candles.items():
+            self.journal.set(f"vela:{sym}", bars[-1].date.date().isoformat())
         changed = bool(result.exits) or any(x.kind in ("ejecutada", "pendiente") for x in result.actions)
         return self._finish(result, account, prices, changed)
+
+    def _stale_symbols(self, candles: dict[str, list[Candle]]) -> set[str]:
+        """Activos cuya última vela es la misma con la que ya se decidió (fin de semana, feriado)."""
+        return {
+            sym for sym, bars in candles.items()
+            if self.journal.get(f"vela:{sym}") == bars[-1].date.date().isoformat()
+        }
 
     def _finish(self, result: CycleResult, account: Account, prices: dict[str, float], changed: bool) -> CycleResult:
         final = self.broker.account(prices) if changed else account

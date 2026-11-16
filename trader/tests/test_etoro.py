@@ -221,3 +221,75 @@ def test_broker_falls_back_to_fixed_stop_when_trailing_not_allowed(fake, tmp_pat
     order = next(r for r in fake.requests if r.url.path.endswith("/orders") and r.method == "POST")
     assert json.loads(order.content)["stopLossType"] == "fixed"
     assert fill.ok and not fill.position.trailing and "stop fijo" in fill.message
+
+
+# --- órdenes enviadas con el mercado cerrado ---------------------------------------------------
+
+
+def _pending_order(journal, symbol="AAPL", order_id="555", ts=None, signal_id=None):
+    from bot_trader.db import iso
+
+    oid = journal.save_order("abrir", symbol, 200, "pendiente", signal_id=signal_id, reference="ref-x",
+                             broker_order=order_id)
+    if ts is not None:
+        journal.conn.execute("UPDATE ordenes SET ts=? WHERE id=?", (iso(ts), oid))
+        journal.conn.commit()
+    return oid
+
+
+def test_pending_order_is_registered_when_lookup_says_filled(fake, tmp_path):
+    journal = Journal(tmp_path / "b.db", "demo")
+    journal.save_instrument("AAPL", 1001)
+    _pending_order(journal)
+    fake.positions = [{"positionID": 777, "instrumentID": 1001, "isBuy": True, "amount": 200,
+                       "unrealizedPnL": {"pnL": 1.0}}]
+    acc = EtoroBroker(journal, client(fake)).account({})
+    assert [p.id for p in acc.positions] == ["777"]
+    assert journal.pending_open_orders() == []
+
+
+def test_pending_order_is_adopted_from_portfolio_when_lookup_fails(fake, tmp_path):
+    from datetime import timedelta
+
+    from bot_trader.db import now_utc
+
+    journal = Journal(tmp_path / "b.db", "demo")
+    journal.save_instrument("AAPL", 1001)
+    sid = journal.save_signal(__import__("bot_trader.models", fromlist=["Signal"]).Signal("AAPL", "COMPRAR", 150),
+                              200, "pendiente")
+    sent = now_utc() - timedelta(days=2)
+    _pending_order(journal, ts=sent, signal_id=sid)
+    _pending_order(journal, ts=sent + timedelta(hours=1))
+    fake.order_status = 2  # eToro sigue diciendo "colocada": la consulta no resuelve
+    opened = (now_utc() - timedelta(hours=3)).isoformat()
+    before = (sent - timedelta(days=30)).isoformat()
+    fake.positions = [
+        {"positionID": 901, "instrumentID": 1001, "isBuy": True, "amount": 200, "units": 1.3, "openRate": 151,
+         "stopLossRate": 120.8, "openDateTime": opened, "mirrorID": 0, "unrealizedPnL": {"pnL": -2}},
+        {"positionID": 902, "instrumentID": 1001, "isBuy": True, "amount": 200, "units": 1.3, "openRate": 151,
+         "stopLossRate": 120.8, "openDateTime": opened, "mirrorID": 0, "unrealizedPnL": {"pnL": -2}},
+        # tuya, abierta antes de las órdenes: no se toca
+        {"positionID": 1, "instrumentID": 1001, "isBuy": True, "amount": 500, "openDateTime": before, "mirrorID": 0},
+        # copy trading: no se toca
+        {"positionID": 2, "instrumentID": 1001, "isBuy": True, "amount": 500, "openDateTime": opened, "mirrorID": 77},
+    ]
+    acc = EtoroBroker(journal, client(fake)).account({})
+    assert sorted(p.id for p in acc.positions) == ["901", "902"]  # una por orden, nunca las tuyas
+    assert journal.pending_open_orders() == []
+    assert journal.signal(sid)["estado"] == "ejecutada"
+    p = next(p for p in acc.positions if p.id == "901")
+    assert p.entry_price == 151 and p.stop == 120.8 and p.amount == 200
+
+
+def test_old_pending_order_expires_without_position(fake, tmp_path):
+    from datetime import timedelta
+
+    from bot_trader.db import now_utc
+
+    journal = Journal(tmp_path / "b.db", "demo")
+    journal.save_instrument("AAPL", 1001)
+    _pending_order(journal, ts=now_utc() - timedelta(days=6))
+    fake.order_status = 2
+    EtoroBroker(journal, client(fake)).account({})
+    assert journal.pending_open_orders() == []
+    assert journal.recent_orders(1)[0]["estado"] == "vencida"

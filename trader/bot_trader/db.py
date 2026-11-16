@@ -257,6 +257,17 @@ class Journal:
             )
         )
 
+    def pending_open_orders(self, newer_than: datetime | None = None) -> list[sqlite3.Row]:
+        """Órdenes de compra/venta enviadas a eToro que todavía no se convirtieron en posición."""
+        rows = self.conn.execute(
+            "SELECT * FROM ordenes WHERE cuenta=? AND estado='pendiente' AND tipo='abrir' ORDER BY id",
+            (self.account,),
+        )
+        out = list(rows)
+        if newer_than is not None:
+            out = [r for r in out if from_iso(r["ts"]) >= newer_than]
+        return out
+
     def update_order(self, order_id: int, state: str, position_id: str | None, detail: dict | None) -> None:
         with self.tx() as c:
             c.execute(
@@ -272,6 +283,12 @@ class Journal:
         )
 
     # --- posiciones propias del bot -------------------------------------------------------
+
+    def has_position(self, position_id: str) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 FROM posiciones WHERE id=? AND cuenta=?", (position_id, self.account)
+        ).fetchone()
+        return row is not None
 
     def add_position(self, p: Position) -> None:
         with self.tx() as c:

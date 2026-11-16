@@ -13,8 +13,9 @@ import logging
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import timedelta
 
-from bot_trader.db import Journal, now_utc
+from bot_trader.db import Journal, from_iso, now_utc
 from bot_trader.etoro import (
     FINAL_FAILURES,
     ORDER_FILLED,
@@ -22,8 +23,11 @@ from bot_trader.etoro import (
     EtoroClient,
     EtoroError,
     ci_get,
+    parse_datetime,
     short_allowed,
 )
+
+PENDING_TTL = timedelta(days=4)  # una orden que no aparece en 4 días ya no se espera
 from bot_trader.models import Account, Candle, Position
 
 log = logging.getLogger(__name__)
@@ -216,9 +220,9 @@ class EtoroBroker(Broker):
         return True, ""  # si no se sabe, decide eToro al recibir la orden
 
     def account(self, prices: dict[str, float]) -> Account:
-        self._reconcile_pending()
         portfolio = self.client.portfolio()
         raw_positions = ci_get(portfolio, "positions", default=[]) or []
+        self._reconcile_pending(raw_positions)
         credit = float(ci_get(portfolio, "credit", default=0) or 0)
         by_id: dict[str, dict] = {}
         invested = unrealized = 0.0
@@ -257,15 +261,88 @@ class EtoroBroker(Broker):
             self.journal.close_position(p.id, price, pnl, "cerrada en eToro (stop, objetivo o manual)")
         return Account(equity=equity, cash=credit, positions=mine, closed_externally=gone)
 
-    def _reconcile_pending(self) -> None:
-        """Órdenes cuyo resultado no se conoció al enviarlas (p. ej. se cortó la conexión)."""
-        for order in self.journal.pending_orders():
-            try:
-                info = self.client.order_info(reference_id=order["referencia"])
-            except EtoroError as exc:
-                log.warning("No pude consultar la orden pendiente %s: %s", order["referencia"], exc)
+    def _reconcile_pending(self, raw_positions: list[dict]) -> None:
+        """Convierte en posiciones las órdenes que se ejecutaron después de enviarlas.
+
+        Pasa siempre con las órdenes enviadas con el mercado cerrado: eToro las ejecuta en la
+        apertura. Primero se consulta la orden a eToro (por número y por referencia). Si eso no
+        resuelve, se "adopta" la posición de eToro del mismo instrumento abierta después de la
+        orden que el bot todavía no tiene registrada. Nunca se adopta una posición abierta antes
+        de la orden (esas son tuyas) ni una de copy trading.
+        """
+        claimed: set[str] = set()
+        for order in self.journal.pending_open_orders():
+            fill = self._lookup(order)
+            if fill is not None and (fill.ok or not fill.pending):
+                continue  # registrada (o rechazada) con la consulta
+            adopted = self._adopt(order, raw_positions, claimed)
+            if adopted is None and now_utc() - from_iso(order["ts"]) > PENDING_TTL:
+                self.journal.update_order(order["id"], "vencida", None, {"motivo": "no apareció la posición en eToro"})
+                log.warning("La orden pendiente de %s (%s) venció sin posición.", order["simbolo"], order["id"])
+
+    def _lookup(self, order) -> Fill | None:
+        for key, value in (("order_id", order["orden_broker"]), ("reference_id", order["referencia"])):
+            if not value:
                 continue
-            self._apply_order_info(order["simbolo"], info, order_row=order)
+            try:
+                info = self.client.order_info(**{key: int(value) if key == "order_id" else value})
+            except (EtoroError, ValueError) as exc:
+                log.warning("No pude consultar la orden pendiente %s por %s: %s", order["id"], key, exc)
+                continue
+            fill = self._apply_order_info(order["simbolo"], info, order_row=order)
+            if fill.ok or not fill.pending:
+                return fill
+        return None
+
+    def _adopt(self, order, raw_positions: list[dict], claimed: set[str]) -> Position | None:
+        iid = self.journal.instrument_id(order["simbolo"])
+        if iid is None:
+            return None
+        sent = from_iso(order["ts"]) - timedelta(minutes=5)
+        candidates = []
+        for raw in raw_positions:
+            pid = str(ci_get(raw, "positionID", "positionId"))
+            if pid in claimed or self.journal.has_position(pid):
+                continue
+            if int(ci_get(raw, "instrumentID", "instrumentId", default=-1) or -1) != iid:
+                continue
+            if int(ci_get(raw, "mirrorID", "mirrorId", default=0) or 0):
+                continue  # copy trading: no es del bot
+            opened_raw = ci_get(raw, "openDateTime")
+            try:
+                opened = parse_datetime(str(opened_raw)) if opened_raw else None
+            except ValueError:
+                opened = None
+            if opened is None or opened < sent:
+                continue  # abierta antes de la orden: es tuya, no del bot
+            candidates.append((opened, pid, raw))
+        if not candidates:
+            return None
+        opened, pid, raw = min(candidates, key=lambda c: c[0])
+        claimed.add(pid)
+        stop = ci_get(raw, "stopLossRate")
+        position = Position(
+            id=pid,
+            symbol=order["simbolo"],
+            instrument_id=iid,
+            is_buy=bool(ci_get(raw, "isBuy", default=True)),
+            amount=float(ci_get(raw, "amount", default=0) or 0),
+            units=float(ci_get(raw, "units", default=0) or 0),
+            leverage=int(float(ci_get(raw, "leverage", default=1) or 1)),
+            entry_price=float(ci_get(raw, "openRate", default=0) or 0),
+            stop=float(stop) if stop and not ci_get(raw, "isNoStopLoss", default=False) else None,
+            target=None,
+            opened_at=opened,
+            trailing=bool(ci_get(raw, "isTslEnabled", default=False)),
+        )
+        if position.trailing and position.stop and position.entry_price:
+            position.trail_distance = abs(position.entry_price - position.stop)
+        self.journal.add_position(position)
+        self.journal.update_order(order["id"], "ejecutada", pid, {"adoptada": True})
+        if order["senal_id"]:
+            self.journal.set_signal_state(order["senal_id"], "ejecutada", pid)
+        log.info("Posición %s de %s registrada desde la cartera de eToro.", pid, order["simbolo"])
+        return position
 
     def _apply_order_info(
         self, symbol: str, info: dict, order_row=None, stop=None, target=None, trailing: bool = False
@@ -300,9 +377,13 @@ class EtoroBroker(Broker):
             )
             if trailing and position.stop is not None and price:
                 position.trail_distance = abs(price - float(position.stop))
+            if self.journal.has_position(position.id):
+                return Fill(True, position=position, message="posición ya registrada", detail=info)
             self.journal.add_position(position)
             if order_row is not None:
                 self.journal.update_order(order_row["id"], "ejecutada", position.id, info)
+                if order_row["senal_id"]:
+                    self.journal.set_signal_state(order_row["senal_id"], "ejecutada", position.id)
             return Fill(True, position=position, message=f"ejecutada en eToro {self.name} a {price:.4f}", detail=info)
         if status in FINAL_FAILURES:
             st = ci_get(info, "status", default={}) or {}

@@ -43,7 +43,12 @@ def test_suggest_mode_does_not_trade_and_dedupes(settings, data):
     assert sugg[0].amount > 0 and not r1.positions
     assert r1.equity == pytest.approx(10_000)
     assert r1.noteworthy and r1.decision_round
-    r2 = bot.run_cycle()
+    r2 = bot.run_cycle()  # misma vela (mercado cerrado): no se vuelve a decidir
+    assert [a.kind for a in r2.actions] == ["bloqueada"] and "no hay precio nuevo" in r2.actions[0].detail
+    last = data["UP"][-1]
+    data["UP"] = data["UP"] + [Candle(last.date + timedelta(days=1), last.close, last.close * 1.001,
+                                      last.close * 0.999, last.close)]
+    r2 = bot.run_cycle()  # vela nueva: la sugerencia pendiente se reutiliza, no se duplica
     assert [a.signal_id for a in r2.actions if a.kind == "sugerida"] == [sugg[0].signal_id]
     # Una sola decisión por día: el siguiente ciclo solo vigila y no repite avisos
     bot.s.decision_hour_utc = 0
@@ -324,3 +329,38 @@ def test_core_mode_opens_with_volatility_weight(settings, data):
     assert "según su volatilidad" in opened[0].detail
     p = bot.journal.open_positions()[0]
     assert not p.trailing and p.stop == pytest.approx(data["UP"][-1].close * 0.8, rel=0.01)
+
+
+
+def test_pending_order_blocks_rebuying_and_reserves_cash(settings, data):
+    settings.mode = "autonomo"
+    bot = make_bot(settings, data)
+    bot.journal.save_order("abrir", "UP", 2_000, "pendiente", reference="r1")
+    r = bot.run_cycle()
+    assert [a.kind for a in r.actions] == ["bloqueada"]
+    assert "orden pendiente" in r.actions[0].detail
+    assert bot.journal.open_positions() == []
+
+
+def test_weekend_does_not_repeat_purchases(settings, data):
+    settings.mode = "autonomo"
+    bot = make_bot(settings, data)
+    bot.run_cycle()
+    assert len(bot.journal.open_positions()) == 1
+    bot.journal.close_position(bot.journal.open_positions()[0].id, 1, 0, "prueba")
+    settings.risk.cooldown_hours = 0
+    r = bot.run_cycle()  # sábado: la misma vela del viernes
+    assert not bot.journal.open_positions() and "no hay precio nuevo" in r.actions[0].detail
+
+
+def test_close_signal_closes_every_duplicate(settings, data):
+    from bot_trader.models import Position
+
+    settings.mode = "autonomo"
+    bot = make_bot(settings, data)
+    for k in range(3):
+        bot.journal.add_position(Position(f"d{k}", "DOWN", True, 500, 5, 100, 50, None, now_utc()))
+    bot.journal.set("efectivo", "8500")
+    r = bot.run_cycle()
+    assert sorted(e.position.id for e in r.exits) == ["d0", "d1", "d2"]
+    assert not [p for p in bot.journal.open_positions() if p.symbol == "DOWN"]
