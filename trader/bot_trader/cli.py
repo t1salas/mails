@@ -25,13 +25,14 @@ import os
 import sys
 import time
 
-from bot_trader.backtest import compare_variants, robustness, run_backtest
+from bot_trader.backtest import compare_aggressive, compare_variants, robustness, run_backtest
 from bot_trader.config import ConfigError, Settings, load_settings
 from bot_trader.engine import build_bot
 from bot_trader.etoro import EtoroClient, EtoroError, ci_get, short_allowed
 from bot_trader.notify import send_telegram
 from bot_trader.report import (
     ACCOUNT_LABEL,
+    aggressive_report,
     analysis_detail,
     analysis_line,
     backtest_report,
@@ -171,6 +172,10 @@ def cmd_backtest(args) -> int:
     candles, errors, reference = bot.fetch_market()
     for sym, err in errors.items():
         print(f"{sym}: {err}")
+    if args.agresivo:
+        print("Comparando 6 versiones del núcleo, de menos a más agresivas (tarda un par de minutos)...", flush=True)
+        print(aggressive_report(compare_aggressive(settings, candles, reference), settings.cash_rate))
+        return 0
     if args.variantes:
         print("Comparando 5 versiones de la estrategia (tarda un par de minutos)...", flush=True)
         print(variants_report(compare_variants(settings, candles, reference), settings.cash_rate))
@@ -305,6 +310,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--capital", type=float, default=None)
     p.add_argument("--robustez", action="store_true", help="repite con variaciones de parámetros")
     p.add_argument("--variantes", action="store_true", help="compara las versiones de la estrategia")
+    p.add_argument("--agresivo", action="store_true", help="compara versiones más agresivas del núcleo")
     p.set_defaults(fn=cmd_backtest)
     sub.add_parser("verificar-etoro").set_defaults(fn=cmd_verificar)
     sub.add_parser("probar-telegram").set_defaults(fn=cmd_probar_telegram)

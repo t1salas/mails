@@ -113,3 +113,31 @@ def test_core_config_keys_and_validation(tmp_path):
     s.strategy = replace(s.strategy, kind="otro")
     with pytest.raises(ConfigError, match="tipo"):
         s.validate()
+
+
+def test_compare_aggressive_same_period_and_no_refuges():
+    from bot_trader.backtest import compare_aggressive
+    from bot_trader.report import aggressive_report
+
+    data = {k: v for k, v in universe(900).items() if k in ("SPY", "QQQ", "GLD", "TLT")}
+    s = Settings(assets=[Asset(k) for k in data])
+    results = compare_aggressive(s, data)
+    labels = [label for label, _ in results]
+    assert labels[0] == "núcleo actual (80 %)" and len(results) == 6
+    assert "núcleo 100 % sin GLD, TLT" in labels
+    starts = {r.start for _, r in results}
+    base = results[0][1].start
+    assert all(st >= base for st in starts)  # nadie se mide antes que la versión actual
+    no_refuge = dict(results)["núcleo 100 % sin GLD, TLT"]
+    assert not {t.symbol for t in no_refuge.trades} & {"GLD", "TLT"}
+    assert s.strategy.kind == "agente" and s.risk.max_total_exposure == 0.8  # la configuración no cambia
+    text = aggressive_report(results, 0.04)
+    assert "Perfil agresivo" in text and "Comparado con núcleo actual" in text and "caída que aguantarías" in text
+
+
+def test_compare_aggressive_without_refuges_in_list():
+    from bot_trader.backtest import compare_aggressive
+
+    data = {k: v for k, v in universe(900).items() if k in ("SPY", "QQQ")}
+    labels = [label for label, _ in compare_aggressive(Settings(assets=[Asset(k) for k in data]), data)]
+    assert len(labels) == 5 and not any("sin " in label for label in labels)

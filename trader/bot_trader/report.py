@@ -300,27 +300,60 @@ def _main_verdict(res: BacktestResult) -> str:
             "Para estos activos, invertir y esperar fue la opción más sostenible.")
 
 
-def variants_report(results: list, cash_rate: float) -> str:
-    """Tabla comparativa y cuál conviene, con la vara mínima de no hacer nada."""
+def _comparison_table(title: str, results: list, cash_rate: float) -> tuple[list[str], list, dict]:
     rows = [(label, r) for label, r in results if r.start is not None]
     if not rows:
-        return "No hay datos suficientes para comparar variantes."
+        return [], rows, {}
     first = rows[0][1]
     b = first.benchmark_stats
+    width = max(36, max(len(label) for label, _ in rows) + 2)
     lines = [
-        f"== Variantes | {first.start} a {first.end} ({first.years:.1f} años) ==",
-        f"  {'versión':<36}{'anual':>8}{'caída':>8}{'Sharpe':>8}{'Calmar':>8}{'años +':>8}{'operac.':>9}",
+        f"== {title} | {first.start} a {first.end} ({first.years:.1f} años) ==",
+        f"  {'versión':<{width}}{'anual':>8}{'caída':>8}{'Sharpe':>8}{'Calmar':>8}{'años +':>8}{'operac.':>9}",
     ]
     for label, r in rows:
         pos = sum(1 for _, y in r.yearly if y > 0)
         lines.append(
-            f"  {label:<36}{r.cagr:>+8.1%}{r.max_dd:>8.1%}{r.sharpe:>8.2f}{r.calmar:>8.2f}"
+            f"  {label:<{width}}{r.cagr:>+8.1%}{r.max_dd:>8.1%}{r.sharpe:>8.2f}{r.calmar:>8.2f}"
             f"{f'{pos}/{len(r.yearly)}':>8}{len(r.trades):>9}"
         )
-    lines.append(f"  {'comprar y mantener (referencia)':<36}{b['cagr']:>+8.1%}{b['max_dd']:>8.1%}{b['sharpe']:>8.2f}"
-                 f"{b.get('calmar', 0):>8.2f}")
-    lines.append(f"  {'dinero sin riesgo (referencia)':<36}{cash_rate:>+8.1%}{0.0:>8.1%}")
+    lines.append(f"  {'comprar y mantener (referencia)':<{width}}{b['cagr']:>+8.1%}{b['max_dd']:>8.1%}"
+                 f"{b['sharpe']:>8.2f}{b.get('calmar', 0):>8.2f}")
+    lines.append(f"  {'dinero sin riesgo (referencia)':<{width}}{cash_rate:>+8.1%}{0.0:>8.1%}")
     lines.append("")
+    return lines, rows, b
+
+
+def aggressive_report(results: list, cash_rate: float) -> str:
+    """Cuánto más gana y cuánto más cae cada paso de agresividad."""
+    lines, rows, b = _comparison_table("Perfil agresivo (núcleo)", results, cash_rate)
+    if not rows:
+        return "No hay datos suficientes para comparar."
+    base_label, base = rows[0]
+    lines.append(f"Comparado con {base_label}:")
+    for label, r in rows[1:]:
+        lines.append(f"  {label}: {r.cagr - base.cagr:+.1%} de rendimiento anual, "
+                     f"{r.max_dd - base.max_dd:+.1%} de caída máxima")
+    lines.append("")
+    candidates = [(label, r) for label, r in rows if r.cagr > cash_rate and len(r.trades) >= 10]
+    if candidates:
+        top = max(candidates, key=lambda x: x[1].cagr)
+        lines.append(f"La que más rinde: {top[0]} ({top[1].cagr:+.1%} anual con caídas de hasta {top[1].max_dd:.1%}).")
+        safer = [x for x in candidates if x[1].max_dd < b["max_dd"]]
+        if safer:
+            best = max(safer, key=lambda x: x[1].cagr)
+            lines.append(f"La que más rinde sin caer más que comprar y mantener ({b['max_dd']:.1%}): "
+                         f"{best[0]} ({best[1].cagr:+.1%} anual, caída {best[1].max_dd:.1%}).")
+    lines.append("Elige por la caída que aguantarías sin vender por miedo: es la que vas a vivir alguna vez.")
+    lines.append("Ojo: elegir la mejor de varias versiones con el mismo pasado sobreestima lo que dará en el futuro.")
+    return "\n".join(lines)
+
+
+def variants_report(results: list, cash_rate: float) -> str:
+    """Tabla comparativa y cuál conviene, con la vara mínima de no hacer nada."""
+    lines, rows, b = _comparison_table("Variantes", results, cash_rate)
+    if not rows:
+        return "No hay datos suficientes para comparar variantes."
     worth = [(label, r) for label, r in rows if r.cagr > cash_rate and len(r.trades) >= 10]
     if not worth:
         lines.append(f"Veredicto: ninguna versión rinde más que el dinero sin riesgo ({cash_rate:.1%} anual). "

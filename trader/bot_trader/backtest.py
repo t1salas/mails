@@ -261,7 +261,9 @@ def run_backtest(
     data: dict[str, list[Candle]],
     initial: float | None = None,
     reference: list[Candle] | None = None,
+    start_on: date | None = None,
 ) -> BacktestResult:
+    """`start_on` fija el inicio de la medición (para comparar versiones sobre el mismo periodo)."""
     sp, rp = settings.strategy, settings.risk
     cost = settings.cost_per_side
     initial = initial or settings.paper_capital
@@ -281,6 +283,8 @@ def run_backtest(
     if not starts:
         return result
     start = min(starts)
+    if start_on is not None:
+        start = max(start, start_on)
     calendar = sorted({d for idx in index.values() for d in idx if d >= start})
 
     cash = initial
@@ -510,4 +514,53 @@ def compare_variants(
         for change in changes:
             change(variant)
         out.append((label, run_backtest(variant, data, reference=reference)))
+    return out
+
+
+# Activos refugio: los que suelen subir o aguantar cuando las acciones caen.
+DEFENSIVE = {"GLD", "IAU", "SLV", "TLT", "IEF", "SHY", "BND", "AGG", "GOVT", "TIP"}
+
+
+def compare_aggressive(
+    settings: Settings, data: dict[str, list[Candle]], reference: list[Candle] | None = None
+) -> list[tuple[str, BacktestResult]]:
+    """Versiones cada vez más agresivas del núcleo, medidas sobre el mismo periodo."""
+
+    def all_in(s: Settings) -> None:
+        s.risk.max_total_exposure = 1.0
+
+    def heavier(s: Settings) -> None:
+        s.risk.max_asset_exposure = max(s.risk.max_asset_exposure, 0.30)
+
+    def faster(s: Settings) -> None:
+        s.strategy.slow_sma = 100
+        s.strategy.fast_sma = min(s.strategy.fast_sma, 50)
+
+    refuges = sorted(set(data) & DEFENSIVE)
+    no_refuge = {k: v for k, v in data.items() if k not in DEFENSIVE}
+    variants = [
+        ("núcleo actual (80 %)", [], data),
+        ("núcleo al 100 %", [all_in], data),
+        ("núcleo 100 %, hasta 30 % por activo", [all_in, heavier], data),
+        ("núcleo con media de 100 días", [faster], data),
+    ]
+    if refuges and no_refuge:
+        quitados = ", ".join(refuges)
+        variants.insert(3, (f"núcleo 100 % sin {quitados}", [all_in], no_refuge))
+        variants.append(("todo junto (100 %, 30 %, sin refugios, media 100)", [all_in, heavier, faster], no_refuge))
+    else:
+        variants.append(("todo junto (100 %, 30 %, media 100)", [all_in, heavier, faster], data))
+
+    out: list[tuple[str, BacktestResult]] = []
+    common: date | None = None
+    for label, changes, subset in variants:
+        variant = deepcopy(settings)
+        variant.strategy.kind = "nucleo"
+        variant.risk.allow_short = False
+        for change in changes:
+            change(variant)
+        res = run_backtest(variant, subset, reference=reference, start_on=common)
+        if common is None:
+            common = res.start  # todas se miden desde donde empieza la versión actual
+        out.append((label, res))
     return out

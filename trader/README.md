@@ -108,7 +108,16 @@ El **núcleo** es la versión más simple:
 
 No intenta adivinar: solo evita quedarse dentro de las caídas largas. Opera poco y casi no tiene parámetros que ajustar.
 
-El reporte dice cuál rinde mejor por unidad de riesgo y si alguna supera al dinero sin riesgo. Ojo: elegir la mejor de varias versiones con el mismo pasado siempre sobreestima lo que dará en el futuro.
+El reporte dice cuál rinde mejor por unidad de riesgo y si alguna supera al dinero sin riesgo.
+
+`python -m bot_trader backtest --agresivo` compara versiones cada vez más agresivas del núcleo, todas sobre el mismo periodo:
+- al 100 % del capital;
+- con hasta 30 % por activo;
+- sin los refugios (oro y bonos);
+- con media de 100 días;
+- todo junto.
+
+Muestra cuánto rendimiento y cuánta caída agrega cada paso. Elige por la caída que aguantarías sin vender por miedo. Ojo: elegir la mejor de varias versiones con el mismo pasado siempre sobreestima lo que dará en el futuro.
 
 ## Ganar también a la baja (ventas en corto)
 
