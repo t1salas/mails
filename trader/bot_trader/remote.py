@@ -19,15 +19,25 @@ import logging
 import secrets
 import time
 from collections.abc import Callable
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 
 import httpx
 
+from bot_trader.backtest import compare_aggressive, compare_variants, run_backtest
 from bot_trader.config import Settings
 from bot_trader.db import Journal, from_iso, iso, now_utc
 from bot_trader.engine import Bot, build_bot
 from bot_trader.notify import send_telegram
-from bot_trader.report import ACCOUNT_LABEL, analysis_line, journal_text, status_text
+from bot_trader.report import (
+    ACCOUNT_LABEL,
+    aggressive_report,
+    analysis_line,
+    backtest_report,
+    journal_text,
+    status_text,
+    variants_report,
+)
 
 log = logging.getLogger(__name__)
 
@@ -45,6 +55,9 @@ COMMANDS = [
     ("cerrar", "Cerrar una posición: /cerrar SPY"),
     ("cerrar_todo", "Cerrar todas las posiciones y pausar"),
     ("aprobar", "Ejecutar una sugerencia: /aprobar 12"),
+    ("backtest", "Probar la estrategia actual con la historia (agrega yahoo para 5 años)"),
+    ("variantes", "Comparar versiones de la estrategia (agrega yahoo para 5 años)"),
+    ("agresivo", "Comparar versiones más agresivas (agrega yahoo para 5 años)"),
     ("ayuda", "Lista de comandos"),
 ]
 
@@ -194,6 +207,35 @@ class Remote:
 
     def cmd_diario(self, args: list[str]) -> str:
         return journal_text(self._bot(), 8)
+
+    # --- backtests (solo leen precios: no operan ni cambian nada) ---------------------------
+
+    def _backtest_setup(self, args: list[str]):
+        settings = deepcopy(self.load_settings())
+        settings.news.enabled = False
+        source = "eToro" if settings.effective_price_source == "etoro" else settings.effective_price_source
+        if args and args[0].lower() == "yahoo":
+            settings.price_source = "yahoo"
+            source = "Yahoo (~5 años)"
+        self.channel.send(f"Calculando con precios de {source}… tarda un par de minutos. Mientras tanto no atiendo "
+                          "otros comandos.")
+        bot = self.make_bot(settings)
+        candles, errors, reference = bot.fetch_market()
+        notes = [f"{sym}: {err}" for sym, err in errors.items()]
+        return settings, candles, reference, notes
+
+    def cmd_backtest(self, args: list[str]) -> str:
+        settings, candles, reference, notes = self._backtest_setup(args)
+        res = run_backtest(settings, candles, reference=reference)
+        return "\n".join(notes + [backtest_report(res, sorted(candles), settings.cash_rate)])
+
+    def cmd_variantes(self, args: list[str]) -> str:
+        settings, candles, reference, notes = self._backtest_setup(args)
+        return "\n".join(notes + [variants_report(compare_variants(settings, candles, reference), settings.cash_rate)])
+
+    def cmd_agresivo(self, args: list[str]) -> str:
+        settings, candles, reference, notes = self._backtest_setup(args)
+        return "\n".join(notes + [aggressive_report(compare_aggressive(settings, candles, reference), settings.cash_rate)])
 
     def cmd_analisis(self, args: list[str]) -> str:
         bot = self._bot()

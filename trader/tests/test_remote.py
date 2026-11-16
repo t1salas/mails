@@ -198,3 +198,21 @@ def test_register_commands_and_factory(remote, tg, settings):
     assert make_remote(lambda: settings) is None  # sin token no hay control remoto
     settings.telegram_token, settings.telegram_chat_id = "t", CHAT
     assert isinstance(make_remote(lambda: settings), Remote)
+
+
+def test_backtest_commands_from_telegram(tg, settings, data):
+    seen = []
+
+    def make(s):
+        seen.append(s.price_source)
+        return make_bot(s, data)
+
+    channel = TelegramChannel("token", CHAT, http=httpx.Client(transport=httpx.MockTransport(tg.handler)))
+    r = Remote(lambda: settings, channel, make_bot=make)
+    reply = say(r, tg, "/agresivo")
+    assert any("Calculando con precios de" in t for t in tg.sent)
+    assert "Perfil agresivo" in reply and "núcleo actual" in reply
+    assert "Variantes" in say(r, tg, "/variantes yahoo") and seen[-1] == "yahoo"
+    assert settings.price_source == "auto"  # la configuración del agente no cambia
+    assert "Rendimiento anual" in say(r, tg, "/backtest")
+    assert open_symbols(settings) == []  # los backtests no operan

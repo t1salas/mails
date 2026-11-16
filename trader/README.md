@@ -256,6 +256,7 @@ Una vez instalado, el día a día es así:
 | `/cerrar SPY` | Cierra esa posición. Pide confirmación. |
 | `/cerrar_todo` | Cierra todas las posiciones del bot y lo pausa. Pide confirmación. |
 | `/aprobar 12` | Ejecuta la sugerencia #12 (con `modo = "sugerir"`). |
+| `/backtest`, `/variantes`, `/agresivo` | Corre esos backtests y te manda la tabla. Agrega `yahoo` (por ejemplo `/agresivo yahoo`) para usar ~5 años de historia. Solo leen precios: no operan. |
 | `/ayuda` | Lista de comandos. |
 
 **Seguridad del control remoto:**
@@ -275,6 +276,12 @@ Los mismos controles existen en el servidor, por si Telegram falla:
 | `python -m bot_trader reanudar` | Vuelve a operar. |
 
 Si prefieres aprobar cada operación, usa `modo = "sugerir"`: el agente te manda la sugerencia con su número y la ejecutas con `/aprobar <número>`. Antes de ejecutar, vuelve a validar la señal con datos frescos.
+
+**Actualizar el agente** a la última versión, sin tocar la configuración ni las llaves. Es una sola línea, como root en el servidor:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/t1salas/mails/claude/blissful-lamport-h4j2no/trader/deploy/actualizar.sh | bash
+```
 
 ## Pasar a dinero REAL (solo después de semanas en demo)
 
